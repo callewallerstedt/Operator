@@ -272,6 +272,12 @@ class PlannerLLM:
         self.client = OpenAI(api_key=config.openai_api_key)
         self.model = config.openai_model
         self.screen = get_screen_capture()
+
+    def _token_kwargs(self, tokens: int) -> dict:
+        """Return the appropriate max token argument for the current model."""
+        if self.model and self.model.startswith("gpt-5"):
+            return {"max_completion_tokens": tokens}
+        return {"max_tokens": tokens}
     
     def plan_next_action(
         self,
@@ -306,7 +312,7 @@ IMPORTANT:
         # Call the vision API
         response = self.client.chat.completions.create(
             model=self.model,
-            max_tokens=config.openai_max_tokens,
+            **self._token_kwargs(config.openai_max_tokens),
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
@@ -463,7 +469,7 @@ Respond with ONLY "yes" or "no"."""
         
         response = self.client.chat.completions.create(
             model=self.model,
-            max_tokens=10,
+            **self._token_kwargs(10),
             messages=[
                 {
                     "role": "user",
