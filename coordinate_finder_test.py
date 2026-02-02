@@ -14,6 +14,7 @@ Method: Cursor Movement
 import os
 import warnings
 import io
+import ctypes
 from contextlib import redirect_stdout, redirect_stderr
 
 # Reduce PaddleOCR startup checks and limit thread contention on some CPUs.
@@ -157,6 +158,7 @@ class CoordinateFinderApp:
         # State
         self.original_image = None
         self.current_image = None
+        self._last_display_image = None
         self.image_path = "tesla.png"
         self.images_dir = os.path.join(os.getcwd(), "images")
         os.makedirs(self.images_dir, exist_ok=True)
@@ -866,6 +868,18 @@ class CoordinateFinderApp:
         stage_nav.pack(fill=tk.X, pady=(0, 6))
         self.stage_label = ttk.Label(stage_nav, textvariable=self.nm_stage_label_var, style='Dark.TLabel')
         self.stage_label.pack(side=tk.LEFT)
+        copy_preview_btn = tk.Button(
+            stage_nav,
+            text="Copy preview",
+            command=self.copy_current_preview_to_clipboard,
+            bg='#238636',
+            fg='white',
+            relief=tk.FLAT,
+            cursor='hand2',
+            padx=10,
+            pady=4,
+        )
+        copy_preview_btn.pack(side=tk.RIGHT, padx=(0, 6))
         nav_btn_frame = ttk.Frame(stage_nav, style='Card.TFrame')
         nav_btn_frame.pack(side=tk.RIGHT)
         self.prev_stage_btn = tk.Button(nav_btn_frame, text="◀ Prev", command=self.show_prev_stage,
@@ -4758,12 +4772,61 @@ Rules:
             image_x = canvas_width // 2 + self.pan_offset_x
             image_y = canvas_height // 2 + self.pan_offset_y
 
+        # Save the rendered image for clipboard copying
+        self._last_display_image = display_img.copy()
         # Convert to PhotoImage and display
         photo = ImageTk.PhotoImage(display_img)
         canvas.delete("all")
         canvas.create_image(image_x, image_y, image=photo, anchor=tk.CENTER)
         canvas.image = photo  # Keep reference
         
+    def copy_current_preview_to_clipboard(self):
+        """Copy the currently displayed preview image (with overlays) to the clipboard."""
+        image = getattr(self, "_last_display_image", None)
+        if image is None:
+            self.log("No preview image is ready to copy.", "error")
+            return
+        if os.name != "nt":
+            self.log("Copying preview images is only supported on Windows.", "error")
+            return
+        try:
+            self._copy_image_to_clipboard_windows(image)
+            self.log("Preview image copied to clipboard.", "success")
+        except Exception as exc:
+            self.log(f"Failed to copy preview image: {exc}", "error")
+
+    def _copy_image_to_clipboard_windows(self, image: Image.Image) -> None:
+        """Use the Windows clipboard APIs to store a BMP version of the image."""
+        if image is None:
+            raise ValueError("No image provided")
+        output = io.BytesIO()
+        image.convert("RGB").save(output, "BMP")
+        data = output.getvalue()[14:]  # skip BMP header
+
+        GMEM_MOVEABLE = 0x0002
+        CF_DIB = 8
+        size = len(data)
+
+        h_mem = ctypes.windll.kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
+        if not h_mem:
+            raise OSError("GlobalAlloc failed")
+        ptr = ctypes.windll.kernel32.GlobalLock(h_mem)
+        if not ptr:
+            ctypes.windll.kernel32.GlobalFree(h_mem)
+            raise OSError("GlobalLock failed")
+
+        ctypes.memmove(ptr, data, size)
+        ctypes.windll.kernel32.GlobalUnlock(h_mem)
+
+        if not ctypes.windll.user32.OpenClipboard(None):
+            ctypes.windll.kernel32.GlobalFree(h_mem)
+            raise OSError("OpenClipboard failed")
+        try:
+            ctypes.windll.user32.EmptyClipboard()
+            if not ctypes.windll.user32.SetClipboardData(CF_DIB, h_mem):
+                raise OSError("SetClipboardData failed")
+        finally:
+            ctypes.windll.user32.CloseClipboard()
     def on_canvas_hover(self, event):
         """Handle mouse hover on canvas to show OCR text."""
         if not self.ocr_results or not self.ocr_results.matches:
