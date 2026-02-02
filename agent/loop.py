@@ -298,6 +298,14 @@ class AgentLoop:
             history=state.history
         )
     
+    def _text_needs_clipboard(self, text: str) -> bool:
+        return any(ord(ch) > 127 for ch in text)
+
+    def _type_text(self, text: str, use_clipboard: bool = False) -> ActionResult:
+        if use_clipboard or self._text_needs_clipboard(text):
+            return self.keyboard.type_text_safe(text)
+        return self.keyboard.type_text(text)
+
     def _execute_action(
         self,
         action: AgentAction,
@@ -309,9 +317,7 @@ class AgentLoop:
             return self.keyboard.press_keys(action.keys)
         
         elif isinstance(action, TypeAction):
-            if action.use_clipboard:
-                return self.keyboard.type_text_safe(action.text)
-            return self.keyboard.type_text(action.text)
+            return self._type_text(action.text, action.use_clipboard)
         
         elif isinstance(action, HotkeyAction):
             return self.keyboard.hotkey(*action.keys)
@@ -446,7 +452,7 @@ class AgentLoop:
                 elif step.action_type == "keypress" and step.keys:
                     step_result = self.keyboard.press_keys(step.keys)
                 elif step.action_type == "type" and step.text is not None:
-                    step_result = self.keyboard.type_text(step.text)
+                    step_result = self._type_text(step.text)
                 elif step.action_type == "ocr_click" and step.text is not None:
                     # Support OCR click in chains
                     from .executors import MouseButton
