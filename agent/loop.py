@@ -23,7 +23,6 @@ from .executors import (
     ActionResult, MouseButton
 )
 from .planner import get_planner, AgentState
-from .vision_click import get_vision_click
 from .click_pipeline import get_click_pipeline
 from .actions import (
     ActionType, KeypressAction, TypeAction, HotkeyAction,
@@ -77,7 +76,6 @@ class AgentLoop:
         self.mouse = get_mouse()
         self.ocr_click = get_ocr_click()
         self.planner = get_planner()
-        self.vision_click = get_vision_click()
         self.click_pipeline = None
         self.viewer = get_viewer() if show_viewer else None
         
@@ -203,7 +201,9 @@ class AgentLoop:
         # 3. Call planner
         console.print("[dim]Planning...[/dim]")
         if self._on_status_callback:
-            self._on_status_callback(f"Step {state.step_number}: Planning next action (GPT-4o)...")
+            self._on_status_callback(
+                f"Step {state.step_number}: Planning next action ({config.openai_model})..."
+            )
         plan = self.planner.plan_next_action(screenshot, state)
         
         # Display thought
@@ -364,9 +364,9 @@ class AgentLoop:
             # Use smart vision-based clicking with two-step zoom method
             # AI will click immediately if confident, otherwise zoom then click
             if self._on_status_callback:
-                self._on_status_callback(f"Smart Click: Looking for '{action.target}'...")
+                self._on_status_callback(f"Coordinate click: Looking for '{action.target}'...")
 
-            # Prefer the coordinate-finder pipeline first, fall back to vision_click if needed.
+            # Use the coordinate-finder pipeline exclusively (no vision_click fallback).
             pipeline_point = None
             try:
                 pipeline = self.click_pipeline or get_click_pipeline()
@@ -402,62 +402,31 @@ class AgentLoop:
                     )
                 return click_result
 
-            # Fallback to vision_click if pipeline is unsure.
-            result = self.vision_click.find_element(
-                screenshot,
-                description=action.target,
-                context=f"Task: {self._current_task}" if hasattr(self, '_current_task') else "",
-                prefer_primary=action.prefer_primary,
-                return_debug_images=True,  # Always return debug images to show in GUI
-                image_callback=self._on_image_callback,  # Real-time image updates
-                status_callback=self._on_status_callback  # Real-time status updates
-            )
-            target, debug_images = result
-
-            if target:
-                # Convert relative coordinates to absolute screen coordinates
-                abs_x = target.x + self.monitor_offset[0]
-                abs_y = target.y + self.monitor_offset[1]
-
-                # Determine click type for status message
-                click_type = "Double-clicking" if action.clicks == 2 else ("Right-clicking" if action.button == "right" else "Clicking")
-                if self._on_status_callback:
-                    self._on_status_callback(f"{click_type} at ({abs_x}, {abs_y})...")
-
-                button = MouseButton(action.button)
-                clicks = getattr(action, 'clicks', 1)
-                click_result = self.mouse.click(abs_x, abs_y, button=button, clicks=clicks)
-                if click_result.success:
-                    # Include debug images in result data so GUI can display them
-                    result_data = {"debug_images": debug_images} if debug_images else None
-                    # Build descriptive message
-                    click_desc = "Double-clicked" if clicks == 2 else ("Right-clicked" if action.button == "right" else "Clicked")
-                    return ActionResult(
-                        True,
-                        f"{click_desc} on '{target.description}' at ({abs_x}, {abs_y})",
-                        screenshot=screenshot,
-                        data=result_data
-                    )
-                return click_result
             return ActionResult(
                 False,
-                f"Smart click failed: could not find '{action.target}'",
+                f"Smart click failed: coordinate-finder pipeline could not find '{action.target}'",
                 screenshot=screenshot,
-                data={"debug_images": debug_images} if debug_images else None
             )
         
         elif isinstance(action, VisionClickAction):
-            # Legacy vision click - redirect to smart click
-            success, target, message, _ = self.vision_click.find_and_click(
-                screenshot,
-                description=action.goal,
-                prefer_primary=True,
-                return_debug_images=False
-            )
-            if success and target:
+            # Route legacy vision click through coordinate-finder pipeline.
+            pipeline_point = None
+            try:
+                pipeline = self.click_pipeline or get_click_pipeline()
+                self.click_pipeline = pipeline
+                pipeline._screen_size = screenshot.size
+                pipeline_point = pipeline.find_click(screenshot, action.goal or "")
+            except Exception as exc:
+                if self._on_status_callback:
+                    self._on_status_callback(f"Click pipeline error: {exc}")
+                pipeline_point = None
+
+            if pipeline_point:
+                abs_x = pipeline_point[0] + self.monitor_offset[0]
+                abs_y = pipeline_point[1] + self.monitor_offset[1]
                 button = MouseButton(action.button)
-                return self.mouse.click(target.x, target.y, button=button)
-            return ActionResult(False, f"Vision click could not find: {action.goal}")
+                return self.mouse.click(abs_x, abs_y, button=button)
+            return ActionResult(False, f"Coordinate-finder pipeline could not find: {action.goal}")
         
         elif isinstance(action, ChainAction):
             # Execute chain of actions with delays
@@ -509,7 +478,7 @@ class AgentLoop:
                         # Refresh screenshot for smart_click (page may have changed)
                         screenshot = self.screen.capture_full()
 
-                        # Try coordinate-finder pipeline first.
+                        # Use coordinate-finder pipeline exclusively.
                         pipeline_point = None
                         try:
                             pipeline = self.click_pipeline or get_click_pipeline()
@@ -534,37 +503,10 @@ class AgentLoop:
                             click_result = self.mouse.click(abs_x, abs_y, button=button, clicks=num_clicks)
                             step_result = click_result
                         else:
-                            # Fallback to smart vision click
-                            result = self.vision_click.find_element(
-                                screenshot,
-                                description=target_description,
-                                context=f"Task: {self._current_task}" if hasattr(self, '_current_task') else "",
-                                prefer_primary=True,
-                                return_debug_images=True,
-                                image_callback=self._on_image_callback,  # Real-time image updates
-                                status_callback=self._on_status_callback  # Real-time status updates
+                            step_result = ActionResult(
+                                False,
+                                f"Smart click failed: coordinate-finder pipeline could not find '{target_description}'"
                             )
-                            target, _ = result
-                            
-                            if target:
-                                # Convert relative coordinates to absolute screen coordinates
-                                abs_x = target.x + self.monitor_offset[0]
-                                abs_y = target.y + self.monitor_offset[1]
-                                
-                                # Get click parameters from step
-                                button_str = getattr(step, 'button', 'left') or 'left'
-                                num_clicks = getattr(step, 'clicks', 1) or 1
-                                
-                                click_type = "Double-clicking" if num_clicks == 2 else ("Right-clicking" if button_str == "right" else "Clicking")
-                                if self._on_status_callback:
-                                    self._on_status_callback(f"{click_type} at ({abs_x}, {abs_y})...")
-                                
-                                from .executors import MouseButton
-                                button = MouseButton(button_str)
-                                click_result = self.mouse.click(abs_x, abs_y, button=button, clicks=num_clicks)
-                                step_result = click_result
-                            else:
-                                step_result = ActionResult(False, f"Smart click failed: could not find '{target_description}'")
                 elif step.action_type == "click" or step.action_type == "mouse_click":
                     # Support regular mouse click in chains
                     if step.x is not None and step.y is not None:

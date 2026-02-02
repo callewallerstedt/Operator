@@ -28,7 +28,7 @@ class AgentConfig:
     
     # OpenAI API Configuration
     openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
-    openai_model: str = "gpt-4o"  # Vision-capable model
+    openai_model: str = "gpt-5.2"  # Vision-capable model
     openai_vision_model: str = "gpt-5.2"  # Separate model for vision clicking (use gpt-5.2 for better precision)
     openai_max_tokens: int = 1024
     

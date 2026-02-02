@@ -1,6 +1,6 @@
 """
 Planner LLM - The brain of the AI Agent.
-Uses OpenAI's GPT-4 Vision to analyze screenshots and decide actions.
+Uses OpenAI's vision-capable model to analyze screenshots and decide actions.
 """
 
 import json
