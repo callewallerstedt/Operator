@@ -4472,7 +4472,7 @@ Rules:
         
         try:
             response = self.client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-4o",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": [
@@ -8052,6 +8052,11 @@ Schema:
                     f"color={color_group}, size={size_px_class} ({width_px}x{height_px})"
                 )
             candidates_text = "\n".join(lines)
+            layout_lines = [
+                f"ID {c.id}: {self._describe_candidate_position(c, snapshot.window_rect)} (text '{c.text or 'icon'}')"
+                for c in candidates
+            ]
+            location_details = "\n".join(layout_lines)
 
             intent_summary = (
                 f"Primary text: '{planner.text_intent.primary_text}' "
@@ -8089,6 +8094,7 @@ Respond with ONLY a JSON object:
                 f"User wants to: {snapshot.user_instruction}\n\n"
                 f"Planner intent:\n{intent_summary}\n\n"
                 f"Candidates found:\n{candidates_text}\n\n"
+                f"Location details:\n{location_details}\n\n"
                 "Look at the screenshot and the candidate text labels. "
                 "Choose the candidate ID that BEST matches what the user wants to click. "
                 "Use semantic understanding - the text doesn't need to match exactly, "
@@ -8145,6 +8151,50 @@ Respond with ONLY a JSON object:
         except Exception as e:
             self.log(f"Picker AI error: {e}", "error")
             return None
+
+    def _describe_candidate_position(
+        self,
+        candidate: CandidatePackage,
+        window_rect: Tuple[int, int, int, int],
+    ) -> str:
+        left, top, right, bottom = candidate.bbox
+        cx = (left + right) / 2.0
+        cy = (top + bottom) / 2.0
+        wl, wt, wr, wb = window_rect
+        win_w = max(1, wr - wl)
+        win_h = max(1, wb - wt)
+
+        def axis_section(value, start, total):
+            norm = (value - start) / total
+            if norm < 0.33:
+                return "left" if total == win_w else "top"
+            if norm > 0.66:
+                return "right" if total == win_w else "bottom"
+            return "center"
+
+        horiz = axis_section(cx, wl, win_w)
+        vert = axis_section(cy, wt, win_h)
+        relative_x = (cx - wl) / win_w
+        relative_y = (cy - wt) / win_h
+
+        edges = []
+        if top - wt < 0.05 * win_h:
+            edges.append("just below the top edge")
+        if wb - bottom < 0.05 * win_h:
+            edges.append("just above the bottom edge")
+        if left - wl < 0.05 * win_w:
+            edges.append("hugging the left edge")
+        if wr - right < 0.05 * win_w:
+            edges.append("hugging the right edge")
+
+        size_desc = f"{right-left}x{bottom-top}px"
+        details = "; ".join(edges) if edges else "away from the window edges"
+        text_label = candidate.text or "non-text icon"
+
+        return (
+            f"{vert}-{horiz} of the window (x={relative_x:.2f}, y={relative_y:.2f}), "
+            f"size {size_desc}, {details}, near {text_label}"
+        )
 
     def _nm_show_virtual_click(
         self,
