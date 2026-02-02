@@ -12,6 +12,22 @@ Method: Cursor Movement
 """
 
 import os
+import warnings
+import io
+from contextlib import redirect_stdout, redirect_stderr
+
+# Reduce PaddleOCR startup checks and limit thread contention on some CPUs.
+os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')
+os.environ.setdefault('DISABLE_MODEL_SOURCE_CHECK', 'True')
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+os.environ.setdefault('PADDLEOCR_SHOW_LOG', 'False')
+os.environ.setdefault('GLOG_minloglevel', '2')
+os.environ.setdefault('FLAGS_minloglevel', '2')
+
+# Suppress noisy warnings from Paddle/PaddleOCR.
+warnings.filterwarnings("ignore", category=UserWarning, message=".*ccache.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*predict.*")
 import sys
 import json
 import base64
@@ -131,15 +147,20 @@ class CoordinateFinderApp:
         # OCR engine (lazy-loaded)
         self.ocr_engine = None
         self.ocr_results = None
-        self.use_paddleocr = True  # Use PaddleOCR by default (better accuracy)
+        self.use_paddleocr = False  # Use Tesseract by default (faster/less setup pain)
         self.paddleocr_ocr = None  # PaddleOCR instance
         # For the new method experiments we do NOT auto-run OCR on startup.
         self.ocr_auto_run = False
+        self._ocr_running = False
+        self.ocr_fast_mode = True
         
         # State
         self.original_image = None
         self.current_image = None
         self.image_path = "tesla.png"
+        self.images_dir = os.path.join(os.getcwd(), "images")
+        os.makedirs(self.images_dir, exist_ok=True)
+        self.image_var = tk.StringVar(value=self.image_path)
         self.iterations = []
         self.is_running = False
         self.current_coords = None
@@ -216,6 +237,7 @@ class CoordinateFinderApp:
         
         self.setup_styles()
         self.setup_ui()
+        self._refresh_image_list()
         self.load_image()
         
         # Show API key dialog if not set
@@ -317,13 +339,27 @@ class CoordinateFinderApp:
         # Prompt input
         prompt_label = ttk.Label(input_card, text="What do you want to click?", style='Dark.TLabel')
         prompt_label.pack(anchor=tk.W, pady=(5, 5))
-        
+
         self.prompt_entry = tk.Entry(input_card, font=('Segoe UI', 11), bg='#21262d', fg='#c9d1d9',
                                      insertbackground='#58a6ff', relief=tk.FLAT, 
                                      highlightthickness=1, highlightbackground='#30363d',
                                      highlightcolor='#58a6ff')
         self.prompt_entry.pack(fill=tk.X, pady=(0, 10), ipady=8)
         self.prompt_entry.insert(0, "Sök input at the top of the screen")
+
+        # Image selection (images/ folder)
+        image_row = ttk.Frame(input_card, style='Card.TFrame')
+        image_row.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(image_row, text="Image:", style='Dark.TLabel').pack(side=tk.LEFT)
+        self.image_combo = ttk.Combobox(
+            image_row,
+            textvariable=self.image_var,
+            values=[],
+            state="readonly",
+            style="Dark.TCombobox",
+        )
+        self.image_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0))
+        self.image_combo.bind("<<ComboboxSelected>>", lambda e: self._on_image_select())
         
         # Buttons - Main control buttons
         btn_frame = ttk.Frame(input_card, style='Card.TFrame')
@@ -333,8 +369,6 @@ class CoordinateFinderApp:
                                    bg='#238636', fg='white', font=('Segoe UI', 11, 'bold'),
                                    relief=tk.FLAT, cursor='hand2', padx=20, pady=8)
         self.start_btn.grid(row=0, column=0, sticky="w", padx=(0, 10), pady=(0, 6))
-        # Disable legacy method while testing the new architecture
-        self.start_btn.config(state=tk.DISABLED)
 
         self.stop_btn = tk.Button(btn_frame, text="■ Stop", command=self.stop_finding,
                                   bg='#da3633', fg='white', font=('Segoe UI', 11, 'bold'),
@@ -351,15 +385,14 @@ class CoordinateFinderApp:
                                        relief=tk.FLAT, cursor='hand2', padx=15, pady=8)
         self.reset_zoom_btn.grid(row=1, column=1, sticky="w", padx=(0, 10), pady=(0, 6))
 
-        # Debug buttons - Second row
+        # Debug tools (single-purpose helpers)
         debug_btn_frame = ttk.Frame(input_card, style='Card.TFrame')
         debug_btn_frame.pack(fill=tk.X, pady=(5, 0))
 
-        # New architecture test button (Planner → Deterministic → Picker → Verifier)
-        self.new_method_btn = tk.Button(
+        self.border_color_btn = tk.Button(
             debug_btn_frame,
-            text="Test New Method",
-            command=self.run_new_method_once,
+            text="Border Color Test",
+            command=self.run_border_color_test,
             bg='#1f6feb',
             fg='white',
             font=('Segoe UI', 10, 'bold'),
@@ -368,32 +401,7 @@ class CoordinateFinderApp:
             padx=12,
             pady=8,
         )
-        self.new_method_btn.grid(row=0, column=0, sticky="w", padx=(0, 10))
-
-        # SeeClick one-shot button
-        self.seeclick_btn = tk.Button(
-            debug_btn_frame,
-            text="Use SeeClick Once",
-            command=self.run_seeclick_once,
-            bg='#8957e5',
-            fg='white',
-            font=('Segoe UI', 10, 'bold'),
-            relief=tk.FLAT,
-            cursor='hand2',
-            padx=12,
-            pady=8,
-        )
-        self.seeclick_btn.grid(row=0, column=1, sticky="w", padx=(0, 10))
-        # Disable SeeClick path for this experiment so we only exercise the new method
-        self.seeclick_btn.config(state=tk.DISABLED)
-
-        # OCR button
-        self.ocr_btn = tk.Button(debug_btn_frame, text="🔍 Run OCR", command=self.run_ocr,
-                                 bg='#8957e5', fg='white', font=('Segoe UI', 10, 'bold'),
-                                 relief=tk.FLAT, cursor='hand2', padx=12, pady=8)
-        self.ocr_btn.grid(row=0, column=2, sticky="w", padx=(0, 10))
-        # Keep manual OCR disabled to focus on the new deterministic + planner path
-        self.ocr_btn.config(state=tk.DISABLED)
+        self.border_color_btn.grid(row=0, column=0, sticky="w", padx=(0, 10))
 
         # New method filter toggles
         toggle_frame = ttk.Frame(input_card, style='Card.TFrame')
@@ -489,6 +497,20 @@ class CoordinateFinderApp:
         )
         self.color_mask_settings_btn.grid(row=3, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
 
+        self.hue_editor_btn = tk.Button(
+            color_mask_frame,
+            text="Hue Editor",
+            command=self.open_hue_editor,
+            bg='#30363d',
+            fg='white',
+            font=('Segoe UI', 10, 'bold'),
+            relief=tk.FLAT,
+            cursor='hand2',
+            padx=12,
+            pady=8
+        )
+        self.hue_editor_btn.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
         self.sample_color_btn = tk.Button(
             color_mask_frame,
             text="Sample Color",
@@ -501,7 +523,7 @@ class CoordinateFinderApp:
             padx=12,
             pady=8
         )
-        self.sample_color_btn.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        self.sample_color_btn.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
         # OCR match override input
         ocr_match_frame = ttk.Frame(input_card, style='Card.TFrame')
@@ -891,20 +913,21 @@ class CoordinateFinderApp:
     def load_image(self):
         """Load the test image."""
         try:
-            if os.path.exists(self.image_path):
+            resolved = self._resolve_image_path(self.image_path)
+            if os.path.exists(resolved):
                 # Load image at full quality - no compression or resizing
-                self.original_image = Image.open(self.image_path)
+                self.original_image = Image.open(resolved)
                 # Ensure we're using the original quality
                 if self.original_image.format == 'PNG':
                     # PNG is lossless, good
                     pass
                 elif self.original_image.format == 'JPEG':
                     # Reload without any quality loss
-                    self.original_image = Image.open(self.image_path)
+                    self.original_image = Image.open(resolved)
                 
                 self.current_image = self.original_image.copy()
                 self.size_label.config(text=f"{self.original_image.width} x {self.original_image.height}")
-                self.log("Loaded image: " + self.image_path, 'info')
+                self.log("Loaded image: " + resolved, 'info')
                 self.log(f"Image dimensions: {self.original_image.width}x{self.original_image.height} (full quality)", 'info')
                 self.update_displays()
                 
@@ -912,7 +935,7 @@ class CoordinateFinderApp:
                 if self.ocr_auto_run:
                     self.root.after(500, self.run_ocr)
             else:
-                self.log("tesla.png not found!", 'error')
+                self.log(f"Image not found: {self.image_path}", 'error')
         except Exception as e:
             self.log(f"Error loading image: {e}", 'error')
             
@@ -1280,7 +1303,14 @@ class CoordinateFinderApp:
         """Toggle color mask filter (combines with other enabled filters)."""
         self.nm_filter_color_enabled.set(not self.nm_filter_color_enabled.get())
         self._nm_manual_update_toggle_ui()
-        self._nm_manual_schedule_refresh(immediate=True)
+        if self.nm_filter_color_enabled.get():
+            color_override = (self._nm_get_color_override() or "").strip()
+            self.log(f"Color mask ON (color='{color_override or 'unknown'}')", "info")
+            # Refresh manual pipeline view so the effect is visible immediately.
+            self._nm_manual_schedule_refresh(immediate=True)
+        else:
+            self.log("Color mask OFF", "info")
+            self._nm_manual_schedule_refresh(immediate=True)
 
     def run_color_mask_debug(self):
         """Show the raw color mask the detector uses."""
@@ -1738,24 +1768,49 @@ class CoordinateFinderApp:
 
         # Filter order: color -> OCR match -> size -> position
         if self.nm_filter_color_enabled.get():
-            # If we generated color-only candidates, don't recompute the mask here.
-            if gen_use_color and (not gen_use_ocr) and (not gen_use_shape):
-                pass
+            # Always compute masks here so the toggle shows a visible stage.
+            color_override = self._nm_get_color_override()
+            regions = []
+            masks_u8 = []
+            if not color_override:
+                kept = []
+                self.log("Color mask enabled but empty; no candidates match.", "info")
             else:
-                color_override = self._nm_get_color_override()
-                if not color_override:
-                    kept = []
-                    self.log("Color mask enabled but empty; no candidates match.", "info")
-                else:
-                    roi_full = ScreenRegion(left=0, top=0, width=snapshot.image.width, height=snapshot.image.height)
-                    regions = self._nm_find_color_regions(
-                        snapshot.image,
-                        roi_full,
-                        color_override,
-                        True,
-                        self._nm_get_color_max_area(),
-                    )
-                    kept = [c for c in kept if self._nm_point_in_any_rect(c.click_point, regions)]
+                roi_full = ScreenRegion(left=0, top=0, width=snapshot.image.width, height=snapshot.image.height)
+                regions, masks_u8 = self._nm_find_color_regions(
+                    snapshot.image,
+                    roi_full,
+                    color_override,
+                    True,
+                    self._nm_get_color_max_area(),
+                    return_masks=True,
+                )
+                kept = [c for c in kept if self._nm_point_in_any_rect(c.click_point, regions)]
+
+            # Visualize raw masks so the effect is obvious when toggling the filter.
+            if masks_u8:
+                try:
+                    import numpy as np
+
+                    def add_mask_stage(label: str, mask_u8: "np.ndarray") -> None:
+                        overlay = snapshot.image.copy().convert("RGBA")
+                        mask_rgba = Image.fromarray(mask_u8).convert("L")
+                        tint = Image.new("RGBA", overlay.size, (0, 180, 255, 120))
+                        overlay = Image.composite(tint, overlay, mask_rgba)
+                        self._nm_add_stage(label, overlay.convert("RGB"))
+
+                    combined = np.zeros_like(masks_u8[0], dtype=np.uint8)
+                    for m in masks_u8:
+                        if m is not None:
+                            combined = np.maximum(combined, m)
+                    add_mask_stage(f"Color mask combined ({len(masks_u8)})", combined)
+                    if len(masks_u8) > 1:
+                        for i, m in enumerate(masks_u8, start=1):
+                            if m is None:
+                                continue
+                            add_mask_stage(f"Color mask split {i}/{len(masks_u8)}", m)
+                except Exception:
+                    pass
             overlay = self._nm_draw_candidates_overlay(snapshot.image, kept, highlight_id=None, show_ids=True)
             self._nm_add_stage(f"After color ({len(kept)})", overlay)
 
@@ -2012,13 +2067,13 @@ class CoordinateFinderApp:
             "hue": {
                 "red1": (0, 10),
                 "red2": (170, 179),
-                "orange": (12, 24),
-                "yellow": (18, 35),
-                "green": (50, 85),
-                "teal": (86, 102),
-                "blue": (100, 140),
-                "purple": (130, 155),
-                "pink": (155, 170),
+                "orange": (5, 24),
+                "yellow": (16, 35),
+                "green": (31, 85),
+                "teal": (86, 105),
+                "blue": (97, 130),
+                "purple": (125, 147),
+                "pink": (138, 170),
                 "brown": (10, 25),
             },
             "sat_val": {
@@ -2026,20 +2081,20 @@ class CoordinateFinderApp:
                 "strong_v": 35,
                 "soft_s": 20,
                 "soft_v": 70,
-                "blue_strong_s": 35,
-                "blue_strong_v": 35,
-                "blue_soft_s": 20,
-                "blue_soft_v": 55,
+                "blue_strong_s": 60,
+                "blue_strong_v": 50,
+                "blue_soft_s": 45,
+                "blue_soft_v": 70,
             },
             "blue_dom": {
-                "b_over_g": 12,
-                "b_over_r": 18,
+                "b_over_g": 25,
+                "b_over_r": 35,
             },
             "blue_contrast": {
-                "delta_s": 4,
-                "delta_v": 6,
-                "delta_b": 8,
-                "delta_h": 4,
+                "delta_s": 8,
+                "delta_v": 10,
+                "delta_b": 12,
+                "delta_h": 6,
             },
             "grey": {
                 "diff": 25,
@@ -2165,28 +2220,28 @@ class CoordinateFinderApp:
             s = self.nm_color_settings
             s["hue"]["red1"] = (iv("red_h1_min", 0), iv("red_h1_max", 10))
             s["hue"]["red2"] = (iv("red_h2_min", 170), iv("red_h2_max", 179))
-            s["hue"]["orange"] = (iv("orange_h_min", 12), iv("orange_h_max", 24))
-            s["hue"]["yellow"] = (iv("yellow_h_min", 18), iv("yellow_h_max", 35))
-            s["hue"]["green"] = (iv("green_h_min", 50), iv("green_h_max", 85))
-            s["hue"]["teal"] = (iv("teal_h_min", 86), iv("teal_h_max", 102))
-            s["hue"]["blue"] = (iv("blue_h_min", 100), iv("blue_h_max", 140))
-            s["hue"]["purple"] = (iv("purple_h_min", 130), iv("purple_h_max", 155))
-            s["hue"]["pink"] = (iv("pink_h_min", 155), iv("pink_h_max", 170))
+            s["hue"]["orange"] = (iv("orange_h_min", 5), iv("orange_h_max", 24))
+            s["hue"]["yellow"] = (iv("yellow_h_min", 16), iv("yellow_h_max", 35))
+            s["hue"]["green"] = (iv("green_h_min", 31), iv("green_h_max", 85))
+            s["hue"]["teal"] = (iv("teal_h_min", 86), iv("teal_h_max", 105))
+            s["hue"]["blue"] = (iv("blue_h_min", 97), iv("blue_h_max", 130))
+            s["hue"]["purple"] = (iv("purple_h_min", 125), iv("purple_h_max", 147))
+            s["hue"]["pink"] = (iv("pink_h_min", 138), iv("pink_h_max", 170))
             s["hue"]["brown"] = (iv("brown_h_min", 10), iv("brown_h_max", 25))
             s["sat_val"]["strong_s"] = iv("strong_s", 35)
             s["sat_val"]["strong_v"] = iv("strong_v", 35)
             s["sat_val"]["soft_s"] = iv("soft_s", 20)
             s["sat_val"]["soft_v"] = iv("soft_v", 70)
-            s["sat_val"]["blue_strong_s"] = iv("blue_strong_s", 35)
-            s["sat_val"]["blue_strong_v"] = iv("blue_strong_v", 35)
-            s["sat_val"]["blue_soft_s"] = iv("blue_soft_s", 20)
-            s["sat_val"]["blue_soft_v"] = iv("blue_soft_v", 55)
-            s["blue_dom"]["b_over_g"] = iv("blue_b_over_g", 12)
-            s["blue_dom"]["b_over_r"] = iv("blue_b_over_r", 18)
-            s["blue_contrast"]["delta_s"] = iv("blue_delta_s", 4)
-            s["blue_contrast"]["delta_v"] = iv("blue_delta_v", 6)
-            s["blue_contrast"]["delta_b"] = iv("blue_delta_b", 8)
-            s["blue_contrast"]["delta_h"] = iv("blue_delta_h", 4)
+            s["sat_val"]["blue_strong_s"] = iv("blue_strong_s", 60)
+            s["sat_val"]["blue_strong_v"] = iv("blue_strong_v", 50)
+            s["sat_val"]["blue_soft_s"] = iv("blue_soft_s", 45)
+            s["sat_val"]["blue_soft_v"] = iv("blue_soft_v", 70)
+            s["blue_dom"]["b_over_g"] = iv("blue_b_over_g", 25)
+            s["blue_dom"]["b_over_r"] = iv("blue_b_over_r", 35)
+            s["blue_contrast"]["delta_s"] = iv("blue_delta_s", 8)
+            s["blue_contrast"]["delta_v"] = iv("blue_delta_v", 10)
+            s["blue_contrast"]["delta_b"] = iv("blue_delta_b", 12)
+            s["blue_contrast"]["delta_h"] = iv("blue_delta_h", 6)
             s["grey"]["diff"] = iv("grey_diff", 25)
             s["grey"]["white_min"] = iv("white_min", 215)
             s["grey"]["black_max"] = iv("black_max", 50)
@@ -2224,6 +2279,158 @@ class CoordinateFinderApp:
                   bg='#444c56', fg='white', font=('Segoe UI', 10, 'bold'),
                   relief=tk.FLAT, cursor='hand2', padx=12, pady=6).pack(side=tk.LEFT)
 
+    def open_hue_editor(self):
+        """Popup to visualize and edit hue thresholds with a gradient preview."""
+        try:
+            if hasattr(self, "_hue_editor_win") and self._hue_editor_win.winfo_exists():
+                self._hue_editor_win.lift()
+                return
+        except Exception:
+            pass
+
+        win = tk.Toplevel(self.root)
+        self._hue_editor_win = win
+        win.title("Hue Editor")
+        win.geometry("700x620")
+        win.configure(bg="#0d1117")
+
+        header = ttk.Frame(win, style='Card.TFrame', padding=10)
+        header.pack(fill=tk.X, padx=10, pady=(10, 6))
+        ttk.Label(header, text="Hue ranges (0–179). Adjust min/max to tighten color masks.",
+                  style='Header.TLabel').pack(anchor=tk.W)
+
+        # Preview area
+        preview_frame = ttk.Frame(win, style='Card.TFrame', padding=10)
+        preview_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        self._hue_preview_label = ttk.Label(preview_frame)
+        self._hue_preview_label.pack(fill=tk.X)
+
+        body = ttk.Frame(win, style='Card.TFrame', padding=10)
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        # Editable hue ranges
+        self._hue_vars = {}
+        for name, (hmin, hmax) in self.nm_color_settings["hue"].items():
+            row = ttk.Frame(body, style='Dark.TFrame')
+            row.pack(fill=tk.X, pady=3)
+            ttk.Label(row, text=name, style='Dark.TLabel', width=10).pack(side=tk.LEFT, padx=(6, 8))
+            min_var = tk.StringVar(value=str(hmin))
+            max_var = tk.StringVar(value=str(hmax))
+            min_entry = tk.Entry(row, textvariable=min_var, width=8, bg='#21262d', fg='#c9d1d9',
+                                 insertbackground='#58a6ff', relief=tk.FLAT, highlightthickness=1,
+                                 highlightbackground='#30363d', highlightcolor='#58a6ff')
+            max_entry = tk.Entry(row, textvariable=max_var, width=8, bg='#21262d', fg='#c9d1d9',
+                                 insertbackground='#58a6ff', relief=tk.FLAT, highlightthickness=1,
+                                 highlightbackground='#30363d', highlightcolor='#58a6ff')
+            min_entry.pack(side=tk.LEFT, padx=(0, 6))
+            max_entry.pack(side=tk.LEFT, padx=(0, 6))
+            ttk.Label(row, text="min / max", style='Dark.TLabel').pack(side=tk.LEFT, padx=(6, 0))
+            self._hue_vars[name] = (min_var, max_var)
+            min_var.trace_add("write", lambda *args: self._update_hue_editor_preview(apply_live=True))
+            max_var.trace_add("write", lambda *args: self._update_hue_editor_preview(apply_live=True))
+
+        btn_row = ttk.Frame(win, style='Dark.TFrame')
+        btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+        tk.Button(btn_row, text="Apply", command=lambda: self._update_hue_editor_preview(apply_live=True),
+                  bg='#238636', fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief=tk.FLAT, cursor='hand2', padx=12, pady=6).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btn_row, text="Reset Defaults", command=self._reset_hue_defaults,
+                  bg='#444c56', fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief=tk.FLAT, cursor='hand2', padx=12, pady=6).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btn_row, text="Close", command=win.destroy,
+                  bg='#30363d', fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief=tk.FLAT, cursor='hand2', padx=12, pady=6).pack(side=tk.LEFT)
+
+        self._update_hue_editor_preview(apply_live=False)
+
+    def _reset_hue_defaults(self):
+        """Reset only hue ranges to defaults and refresh the editor."""
+        defaults = self._nm_color_settings_defaults()["hue"]
+        self.nm_color_settings["hue"] = dict(defaults)
+        if hasattr(self, "_hue_vars"):
+            for name, (min_var, max_var) in self._hue_vars.items():
+                hmin, hmax = defaults.get(name, (0, 179))
+                min_var.set(str(hmin))
+                max_var.set(str(hmax))
+        self._update_hue_editor_preview(apply_live=False)
+
+    def _update_hue_editor_preview(self, apply_live: bool = True):
+        """Update the hue editor preview image and optionally apply changes live."""
+        if not hasattr(self, "_hue_vars"):
+            return
+
+        def clamp_hue(value, default):
+            try:
+                v = int(float(value))
+            except Exception:
+                v = default
+            return max(0, min(179, v))
+
+        preview_ranges = {}
+        for name, (min_var, max_var) in self._hue_vars.items():
+            hmin = clamp_hue(min_var.get().strip(), 0)
+            hmax = clamp_hue(max_var.get().strip(), 179)
+            preview_ranges[name] = (hmin, hmax)
+
+        if apply_live:
+            for name, (hmin, hmax) in preview_ranges.items():
+                self.nm_color_settings["hue"][name] = (hmin, hmax)
+
+        img = self._render_hue_preview(preview_ranges)
+        if img is None:
+            return
+        try:
+            self._hue_preview_img = ImageTk.PhotoImage(img)
+            self._hue_preview_label.configure(image=self._hue_preview_img)
+            self._hue_preview_label.image = self._hue_preview_img
+        except Exception:
+            pass
+
+    def _render_hue_preview(self, ranges: Dict[str, Tuple[int, int]]) -> Optional[Image.Image]:
+        """Render a hue gradient with ranges overlaid."""
+        try:
+            import colorsys
+        except Exception:
+            return None
+
+        width = 640
+        height = 80
+        bar_top = 16
+        bar_height = 32
+        img = Image.new("RGB", (width, height), (13, 17, 23))
+        draw = ImageDraw.Draw(img)
+
+        # Gradient bar
+        for x in range(width):
+            hue = int(round(x * 179 / (width - 1)))
+            r, g, b = colorsys.hsv_to_rgb(hue / 179.0, 1.0, 1.0)
+            draw.line([(x, bar_top), (x, bar_top + bar_height)], fill=(int(r * 255), int(g * 255), int(b * 255)))
+
+        # Overlay ranges
+        label_y = bar_top + bar_height + 4
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
+
+        order = ["red1", "red2", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "brown"]
+        for idx, name in enumerate(order):
+            if name not in ranges:
+                continue
+            hmin, hmax = ranges[name]
+            x0 = int(hmin / 179 * (width - 1))
+            x1 = int(hmax / 179 * (width - 1))
+            mid = (hmin + hmax) / 2.0
+            r, g, b = colorsys.hsv_to_rgb(mid / 179.0, 1.0, 1.0)
+            color = (int(r * 255), int(g * 255), int(b * 255))
+            draw.rectangle([x0, bar_top, x1, bar_top + bar_height], outline=color, width=2)
+            # Stagger labels a bit for readability
+            text_y = label_y + (idx % 2) * 12
+            draw.text((x0 + 2, text_y), f"{name} {hmin}-{hmax}", fill=color, font=font)
+
+        return img
+
     def _on_mask_settings_change(self):
         """Debounced live update for mask settings."""
         try:
@@ -2246,28 +2453,28 @@ class CoordinateFinderApp:
             s = self.nm_color_settings
             s["hue"]["red1"] = (iv("red_h1_min", 0), iv("red_h1_max", 10))
             s["hue"]["red2"] = (iv("red_h2_min", 170), iv("red_h2_max", 179))
-            s["hue"]["orange"] = (iv("orange_h_min", 12), iv("orange_h_max", 24))
-            s["hue"]["yellow"] = (iv("yellow_h_min", 18), iv("yellow_h_max", 35))
-            s["hue"]["green"] = (iv("green_h_min", 50), iv("green_h_max", 85))
-            s["hue"]["teal"] = (iv("teal_h_min", 86), iv("teal_h_max", 102))
-            s["hue"]["blue"] = (iv("blue_h_min", 100), iv("blue_h_max", 140))
-            s["hue"]["purple"] = (iv("purple_h_min", 130), iv("purple_h_max", 155))
-            s["hue"]["pink"] = (iv("pink_h_min", 155), iv("pink_h_max", 170))
+            s["hue"]["orange"] = (iv("orange_h_min", 5), iv("orange_h_max", 24))
+            s["hue"]["yellow"] = (iv("yellow_h_min", 16), iv("yellow_h_max", 35))
+            s["hue"]["green"] = (iv("green_h_min", 31), iv("green_h_max", 85))
+            s["hue"]["teal"] = (iv("teal_h_min", 86), iv("teal_h_max", 105))
+            s["hue"]["blue"] = (iv("blue_h_min", 97), iv("blue_h_max", 130))
+            s["hue"]["purple"] = (iv("purple_h_min", 125), iv("purple_h_max", 147))
+            s["hue"]["pink"] = (iv("pink_h_min", 138), iv("pink_h_max", 170))
             s["hue"]["brown"] = (iv("brown_h_min", 10), iv("brown_h_max", 25))
             s["sat_val"]["strong_s"] = iv("strong_s", 35)
             s["sat_val"]["strong_v"] = iv("strong_v", 35)
             s["sat_val"]["soft_s"] = iv("soft_s", 20)
             s["sat_val"]["soft_v"] = iv("soft_v", 70)
-            s["sat_val"]["blue_strong_s"] = iv("blue_strong_s", 35)
-            s["sat_val"]["blue_strong_v"] = iv("blue_strong_v", 35)
-            s["sat_val"]["blue_soft_s"] = iv("blue_soft_s", 20)
-            s["sat_val"]["blue_soft_v"] = iv("blue_soft_v", 55)
-            s["blue_dom"]["b_over_g"] = iv("blue_b_over_g", 12)
-            s["blue_dom"]["b_over_r"] = iv("blue_b_over_r", 18)
-            s["blue_contrast"]["delta_s"] = iv("blue_delta_s", 4)
-            s["blue_contrast"]["delta_v"] = iv("blue_delta_v", 6)
-            s["blue_contrast"]["delta_b"] = iv("blue_delta_b", 8)
-            s["blue_contrast"]["delta_h"] = iv("blue_delta_h", 4)
+            s["sat_val"]["blue_strong_s"] = iv("blue_strong_s", 60)
+            s["sat_val"]["blue_strong_v"] = iv("blue_strong_v", 50)
+            s["sat_val"]["blue_soft_s"] = iv("blue_soft_s", 45)
+            s["sat_val"]["blue_soft_v"] = iv("blue_soft_v", 70)
+            s["blue_dom"]["b_over_g"] = iv("blue_b_over_g", 25)
+            s["blue_dom"]["b_over_r"] = iv("blue_b_over_r", 35)
+            s["blue_contrast"]["delta_s"] = iv("blue_delta_s", 8)
+            s["blue_contrast"]["delta_v"] = iv("blue_delta_v", 10)
+            s["blue_contrast"]["delta_b"] = iv("blue_delta_b", 12)
+            s["blue_contrast"]["delta_h"] = iv("blue_delta_h", 6)
             s["grey"]["diff"] = iv("grey_diff", 25)
             s["grey"]["white_min"] = iv("white_min", 215)
             s["grey"]["black_max"] = iv("black_max", 50)
@@ -2476,6 +2683,77 @@ class CoordinateFinderApp:
             return result
         else:
             return result.convert('RGB')
+
+    def _get_ocr_query_intent(self) -> Optional[PlannerTextIntent]:
+        """Return OCR query intent parsed from the OCR match entry, if any."""
+        if self.nm_ocr_match_entry is None:
+            return None
+        raw_text = (self.nm_ocr_match_entry.get() or "").strip()
+        if not raw_text:
+            return None
+        parts = [p.strip() for p in raw_text.replace("|", ",").split(",") if p.strip()]
+        if not parts:
+            return None
+        return PlannerTextIntent(primary_text=parts[0], variants=parts[1:], strictness="medium")
+
+    def _rank_ocr_matches_for_query(
+        self,
+        matches: List["OCRMatch"],
+        intent: PlannerTextIntent,
+        top_n: int = 5,
+    ) -> List["OCRMatch"]:
+        """Rank OCR matches for a query and return the top N."""
+        query = (intent.primary_text or "").strip().lower()
+        short_query = bool(query) and len(query) <= 2
+        scored = []
+        for match in matches:
+            candidate = (match.text or "").strip().lower()
+            if short_query:
+                if candidate != query:
+                    continue
+                text_score = 1.0
+            else:
+                text_score = self._nm_text_similarity(intent, match.text or "")
+            if text_score <= 0.0:
+                continue
+            combined = (text_score * 100.0) + (match.confidence * 0.25)
+            scored.append((combined, match.confidence, match))
+        scored.sort(key=lambda s: (s[0], s[1]), reverse=True)
+        return [m for _, _, m in scored[:top_n]]
+
+    def draw_ocr_boxes(self, image, matches, color=(0, 255, 0, 255), width=2):
+        """Draw bounding boxes for OCR matches."""
+        if not matches:
+            return image
+
+        if image.mode != 'RGBA':
+            img_rgba = image.convert('RGBA')
+        else:
+            img_rgba = image.copy()
+
+        overlay = Image.new('RGBA', img_rgba.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+
+        try:
+            font = ImageFont.truetype("arial.ttf", 14)
+        except Exception:
+            font = ImageFont.load_default()
+
+        for idx, match in enumerate(matches, 1):
+            l, t, r, b = match.bbox.left, match.bbox.top, match.bbox.right, match.bbox.bottom
+            draw.rectangle([l, t, r, b], outline=color, width=width)
+            draw.text((l + 3, t + 2), str(idx), font=font, fill=color)
+
+        result = Image.alpha_composite(img_rgba, overlay)
+
+        if image.mode == 'RGB':
+            rgb_result = Image.new('RGB', result.size)
+            rgb_result.paste(result, mask=result.split()[3])
+            return rgb_result
+        elif image.mode == 'RGBA':
+            return result
+        else:
+            return result.convert('RGB')
     
     def preprocess_image_variants(self, image):
         """Create multiple preprocessed variants with better quality enhancement."""
@@ -2592,6 +2870,19 @@ class CoordinateFinderApp:
         self.paddleocr_ocr = None
         engine_name = "PaddleOCR" if self.use_paddleocr else "Tesseract"
         self.log(f"OCR engine changed to: {engine_name}", 'info')
+
+    def _set_ocr_ui_running(self, running: bool) -> None:
+        """Enable/disable OCR UI controls while OCR is running."""
+        state = tk.DISABLED if running else tk.NORMAL
+
+        def apply_state():
+            if getattr(self, "ocr_btn", None):
+                self.ocr_btn.config(state=state)
+            if getattr(self, "ocr_match_btn", None):
+                self.ocr_match_btn.config(state=state)
+            self.update_status("OCR running" if running else "Ready", "#58a6ff")
+
+        self.root.after(0, apply_state)
     
     def init_paddleocr(self):
         """Initialize PaddleOCR."""
@@ -2602,12 +2893,25 @@ class CoordinateFinderApp:
             # Try importing PaddleOCR first
             try:
                 import os
-                os.environ['DISABLE_MODEL_SOURCE_CHECK'] = 'True'
-                os.environ['FLAGS_use_mkldnn'] = '0'
-                os.environ['FLAGS_enable_cinn'] = '0'
+                # Avoid the model hoster connectivity check on startup.
+                os.environ.setdefault('PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK', 'True')
+                os.environ.setdefault('DISABLE_MODEL_SOURCE_CHECK', 'True')
+                os.environ.setdefault('FLAGS_use_mkldnn', '0')
+                os.environ.setdefault('FLAGS_enable_cinn', '0')
+
+                try:
+                    import paddle
+                    self.log(f"Paddle version: {getattr(paddle, '__version__', 'unknown')}", 'info')
+                except Exception as pe:
+                    self.log("ERROR: PaddlePaddle runtime not available. Install with: pip install paddlepaddle", 'error')
+                    self.log(f"  Import error: {pe}", 'error')
+                    return False
+
                 from paddleocr import PaddleOCR
-            except ImportError as ie:
-                self.log("✗ PaddleOCR not installed. Install with: pip install paddlepaddle paddleocr \"paddlex[ocr]\" opencv-contrib-python", 'error')
+            except Exception as ie:
+                self.log("ERROR: PaddleOCR not installed or failed to import.", 'error')
+                self.log("  Install with: pip install paddleocr", 'error')
+                self.log(f"  Import error: {ie}", 'error')
                 return False
             
             self.log("Initializing PaddleOCR (sv/Latin multilingual, full quality)...", 'info')
@@ -2617,13 +2921,30 @@ class CoordinateFinderApp:
             # No image resizing - use full quality
             # Initialize PaddleOCR with only valid parameters
             # Swedish uses the Latin model (covers å ä ö)
-            self.paddleocr_ocr = PaddleOCR(
-                lang='sv',
-                use_textline_orientation=True,
-                device="cpu",
-                enable_mkldnn=False,
-                enable_cinn=False
-            )
+            ocr_kwargs = {
+                "lang": "sv",
+                "use_textline_orientation": False,
+                "show_log": False,
+                "device": "cpu",
+                "enable_mkldnn": False,
+                "enable_cinn": False,
+            }
+
+            # Some PaddleOCR builds reject unknown args. Retry after dropping them.
+            while True:
+                try:
+                    with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                        self.paddleocr_ocr = PaddleOCR(**ocr_kwargs)
+                    break
+                except Exception as e:
+                    msg = str(e)
+                    if "Unknown argument:" in msg:
+                        bad = msg.split("Unknown argument:", 1)[-1].strip()
+                        if bad in ocr_kwargs:
+                            self.log(f"PaddleOCR does not support '{bad}'. Retrying without it.", 'info')
+                            del ocr_kwargs[bad]
+                            continue
+                    raise
             self.log("✓ PaddleOCR initialized successfully (sv/Latin multilingual, full quality)", 'success')
             return True
         except Exception as e:
@@ -2641,7 +2962,7 @@ class CoordinateFinderApp:
         if not self.init_paddleocr():
             self.log("Falling back to Tesseract...", 'info')
             self.use_paddleocr = False
-            self.run_ocr()
+            self._run_ocr_impl()
             return
         
         try:
@@ -2671,8 +2992,9 @@ class CoordinateFinderApp:
             img_array = np.array(img_for_ocr.convert('RGB'))
             self.log(f"Processing image: {img_array.shape[1]}x{img_array.shape[0]} pixels", 'info')
             
-            # Run PaddleOCR with full quality image
-            results = self.paddleocr_ocr.ocr(img_array)
+            # Run PaddleOCR with full quality image (suppress noisy stdout/stderr)
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                results = self.paddleocr_ocr.ocr(img_array)
             
             elapsed = time.time() - start_time
             self.log(f"PaddleOCR completed in {elapsed:.2f} seconds", 'success')
@@ -2766,12 +3088,35 @@ class CoordinateFinderApp:
                     from agent.ocr import OCRResult
                     self.ocr_results = OCRResult(matches=final_matches, raw_text=" ".join([m.text for m in final_matches]))
                     
-                    # Draw dots
-                    img_with_dots = self.draw_ocr_dots(self.original_image.copy(), self.ocr_results)
-                    self.current_image = img_with_dots
-                    self.update_displays()
-                    
-                    self.log("Red dots drawn on image at center of each detected text", 'info')
+                    query_intent = self._get_ocr_query_intent()
+                    if query_intent:
+                        top_matches = self._rank_ocr_matches_for_query(
+                            self.ocr_results.matches,
+                            query_intent,
+                            top_n=5,
+                        )
+                        if top_matches:
+                            self.log(
+                                f"Top {len(top_matches)} OCR matches for '{query_intent.primary_text}':",
+                                'info',
+                            )
+                            for i, match in enumerate(top_matches, 1):
+                                self.log(
+                                    f"  {i}. '{match.text}' [conf: {match.confidence:.1f}%]",
+                                    'info',
+                                )
+                            img_with_boxes = self.draw_ocr_boxes(self.original_image.copy(), top_matches)
+                            self.current_image = img_with_boxes
+                            self.root.after(0, lambda: self.update_displays())
+                            self.log("Bounding boxes drawn for top OCR matches", 'info')
+                        else:
+                            self.log(f"No OCR matches for '{query_intent.primary_text}'", 'error')
+                    else:
+                        # Draw dots for all matches
+                        img_with_dots = self.draw_ocr_dots(self.original_image.copy(), self.ocr_results)
+                        self.current_image = img_with_dots
+                        self.root.after(0, lambda: self.update_displays())
+                        self.log("Red dots drawn on image at center of each detected text", 'info')
                 else:
                     self.log("No matches found with 50%+ confidence", 'error')
             else:
@@ -2784,7 +3129,7 @@ class CoordinateFinderApp:
             # Fallback to Tesseract
             self.log("Falling back to Tesseract...", 'info')
             self.use_paddleocr = False
-            self.run_ocr()
+            self._run_ocr_impl()
     
     def download_swedish_language(self):
         """Download Swedish language file for Tesseract."""
@@ -3074,6 +3419,170 @@ class CoordinateFinderApp:
         return merged
     
     def run_ocr(self):
+        """Run OCR in a background thread to keep the UI responsive."""
+        if self._ocr_running:
+            self.log("OCR is already running...", 'info')
+            return
+
+        if not self.original_image:
+            self.log("No image loaded!", 'error')
+            return
+
+        self._ocr_running = True
+        self._set_ocr_ui_running(True)
+
+        def worker():
+            try:
+                self._run_ocr_impl()
+            finally:
+                self._ocr_running = False
+                self._set_ocr_ui_running(False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_ocr_tesseract_fast(self):
+        """Fast single-pass OCR using Tesseract."""
+        try:
+            self.log("\n" + "=" * 50, 'info')
+            self.log("Running fast OCR (Tesseract)...", 'info')
+            self.log("=" * 50, 'info')
+
+            if self.ocr_engine is None:
+                self.ocr_engine = get_ocr_engine()
+                self.log("OCR engine initialized", 'success')
+
+            img_for_ocr = self.original_image
+            scale = 1.0
+            max_ocr_width = 1600
+            if img_for_ocr.width > max_ocr_width:
+                scale = max_ocr_width / img_for_ocr.width
+                new_size = (int(img_for_ocr.width * scale), int(img_for_ocr.height * scale))
+                img_for_ocr = img_for_ocr.resize(new_size, Image.LANCZOS)
+                self.log(f"Resized image for OCR: {self.original_image.width}x{self.original_image.height} → {new_size[0]}x{new_size[1]}", 'info')
+
+            import time
+            start_time = time.time()
+            ocr_result = self.ocr_engine.process(img_for_ocr, include_phrases=False)
+            elapsed = time.time() - start_time
+            self.log(f"OCR completed in {elapsed:.2f} seconds", 'success')
+
+            from agent.ocr import OCRMatch, OCRResult
+            from agent.screenshot import ScreenRegion
+
+            matches = ocr_result.matches or []
+            matches_rescaled = False
+
+            query_intent = self._get_ocr_query_intent()
+            query_text = (query_intent.primary_text if query_intent else "").strip()
+            if query_text and len(query_text) == 1:
+                # For single-letter queries, use character boxes.
+                try:
+                    import pytesseract
+                    lang_to_use = "eng"
+                    try:
+                        lang_to_use = self.ocr_engine._select_language()
+                    except Exception:
+                        pass
+                    boxes = pytesseract.image_to_boxes(
+                        img_for_ocr,
+                        lang=lang_to_use,
+                        config="--oem 3 --psm 6"
+                    )
+                    h = img_for_ocr.height
+                    char_matches = []
+                    q = query_text.lower()
+                    for line in boxes.splitlines():
+                        parts = line.split()
+                        if len(parts) < 5:
+                            continue
+                        ch = parts[0]
+                        if ch.lower() != q:
+                            continue
+                        x1, y1, x2, y2 = map(int, parts[1:5])
+                        left = x1
+                        right = x2
+                        top = h - y2
+                        bottom = h - y1
+                        if scale != 1.0:
+                            inv = 1.0 / scale
+                            left = int(left * inv)
+                            right = int(right * inv)
+                            top = int(top * inv)
+                            bottom = int(bottom * inv)
+                        if right <= left or bottom <= top:
+                            continue
+                        bbox = ScreenRegion(
+                            left=left,
+                            top=top,
+                            width=max(1, right - left),
+                            height=max(1, bottom - top),
+                        )
+                        char_matches.append(OCRMatch(text=ch, confidence=90.0, bbox=bbox, source="char"))
+                    if char_matches:
+                        matches = char_matches
+                        matches_rescaled = True
+                        self.log(f"Found {len(matches)} character matches for '{query_text}'.", 'info')
+                except Exception as e:
+                    self.log(f"Character OCR failed: {e} (continuing with word OCR)", 'info')
+            if scale != 1.0 and matches and not matches_rescaled:
+                scaled = []
+                inv = 1.0 / scale
+                for m in matches:
+                    b = m.bbox
+                    new_bbox = ScreenRegion(
+                        left=int(b.left * inv),
+                        top=int(b.top * inv),
+                        width=max(1, int(b.width * inv)),
+                        height=max(1, int(b.height * inv)),
+                    )
+                    scaled.append(OCRMatch(text=m.text, confidence=m.confidence, bbox=new_bbox, source=m.source))
+                matches = scaled
+
+            if matches:
+                # Deduplicate quick overlaps
+                matches = self.merge_duplicate_matches(matches, merge_distance=10)
+
+                self.ocr_results = OCRResult(
+                    matches=matches,
+                    raw_text=" ".join([m.text for m in matches]),
+                )
+
+                query_intent = self._get_ocr_query_intent()
+                if query_intent:
+                    top_matches = self._rank_ocr_matches_for_query(
+                        self.ocr_results.matches,
+                        query_intent,
+                        top_n=5,
+                    )
+                    if top_matches:
+                        self.log(
+                            f"Top {len(top_matches)} OCR matches for '{query_intent.primary_text}':",
+                            'info',
+                        )
+                        for i, match in enumerate(top_matches, 1):
+                            self.log(
+                                f"  {i}. '{match.text}' [conf: {match.confidence:.1f}%]",
+                                'info',
+                            )
+                        img_with_boxes = self.draw_ocr_boxes(self.original_image.copy(), top_matches)
+                        self.current_image = img_with_boxes
+                        self.root.after(0, lambda: self.update_displays())
+                        self.log("Bounding boxes drawn for top OCR matches", 'info')
+                    else:
+                        self.log(f"No OCR matches for '{query_intent.primary_text}'", 'error')
+                else:
+                    img_with_dots = self.draw_ocr_dots(self.original_image.copy(), self.ocr_results)
+                    self.current_image = img_with_dots
+                    self.root.after(0, lambda: self.update_displays())
+                    self.log("Red dots drawn on image at center of each detected text", 'info')
+            else:
+                self.log("No text found in image", 'error')
+        except Exception as e:
+            self.log(f"Error running fast OCR: {e}", 'error')
+            import traceback
+            self.log(traceback.format_exc(), 'error')
+
+    def _run_ocr_impl(self):
         """Run OCR with multiple strategies and combine results for better consistency."""
         if not self.original_image:
             self.log("No image loaded!", 'error')
@@ -3082,6 +3591,11 @@ class CoordinateFinderApp:
         # Use PaddleOCR if selected
         if self.use_paddleocr:
             self.run_ocr_paddleocr()
+            return
+
+        # Default to fast Tesseract path
+        if self.ocr_fast_mode:
+            self._run_ocr_tesseract_fast()
             return
         
         try:
@@ -3365,12 +3879,35 @@ class CoordinateFinderApp:
                 from agent.ocr import OCRResult
                 self.ocr_results = OCRResult(matches=merged_matches, raw_text=" ".join([m.text for m in merged_matches]))
                 
-                # Draw dots on the image
-                img_with_dots = self.draw_ocr_dots(self.original_image.copy(), self.ocr_results)
-                self.current_image = img_with_dots
-                self.update_displays()
-                
-                self.log("Red dots drawn on image at center of each detected text", 'info')
+                query_intent = self._get_ocr_query_intent()
+                if query_intent:
+                    top_matches = self._rank_ocr_matches_for_query(
+                        self.ocr_results.matches,
+                        query_intent,
+                        top_n=5,
+                    )
+                    if top_matches:
+                        self.log(
+                            f"Top {len(top_matches)} OCR matches for '{query_intent.primary_text}':",
+                            'info',
+                        )
+                        for i, match in enumerate(top_matches, 1):
+                            self.log(
+                                f"  {i}. '{match.text}' [conf: {match.confidence:.1f}%]",
+                                'info',
+                            )
+                        img_with_boxes = self.draw_ocr_boxes(self.original_image.copy(), top_matches)
+                        self.current_image = img_with_boxes
+                        self.root.after(0, lambda: self.update_displays())
+                        self.log("Bounding boxes drawn for top OCR matches", 'info')
+                    else:
+                        self.log(f"No OCR matches for '{query_intent.primary_text}'", 'error')
+                else:
+                    # Draw dots on the image
+                    img_with_dots = self.draw_ocr_dots(self.original_image.copy(), self.ocr_results)
+                    self.current_image = img_with_dots
+                    self.root.after(0, lambda: self.update_displays())
+                    self.log("Red dots drawn on image at center of each detected text", 'info')
             else:
                 self.log("No text found in image", 'error')
                 self.log("Try: Ensure image has clear text, good contrast, and Tesseract is properly installed", 'info')
@@ -3923,9 +4460,66 @@ Rules:
     def log(self, message, tag='info'):
         """Add a message to the log."""
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.insert(tk.END, f"[{timestamp}] ", 'time')
-        self.log_text.insert(tk.END, f"{message}\n", tag)
-        self.log_text.see(tk.END)
+
+        def _append():
+            self.log_text.insert(tk.END, f"[{timestamp}] ", 'time')
+            self.log_text.insert(tk.END, f"{message}\n", tag)
+            self.log_text.see(tk.END)
+
+        if threading.current_thread() is threading.main_thread():
+            _append()
+        else:
+            self.root.after(0, _append)
+
+    def _resolve_image_path(self, name: str) -> str:
+        if not name:
+            return self.image_path
+        if os.path.isabs(name) and os.path.exists(name):
+            return name
+        candidate = os.path.join(self.images_dir, name)
+        if os.path.exists(candidate):
+            return candidate
+        return name
+
+    def _refresh_image_list(self):
+        exts = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
+        files = []
+        if os.path.isdir(self.images_dir):
+            for f in sorted(os.listdir(self.images_dir)):
+                if f.lower().endswith(exts):
+                    files.append(f)
+        if not files and os.path.exists(self.image_path):
+            files = [os.path.basename(self.image_path)]
+        if getattr(self, "image_combo", None):
+            self.image_combo["values"] = files
+        if files:
+            if self.image_var.get() not in files:
+                self.image_var.set(files[0])
+        return files
+
+    def _on_image_select(self):
+        name = (self.image_var.get() or "").strip()
+        if not name:
+            return
+        self.image_path = self._resolve_image_path(name)
+        self.load_image()
+
+    def run_border_color_test(self):
+        """Debug: show border-based color regions."""
+        if not self.original_image:
+            self.log("No image loaded!", 'error')
+            return
+        target = ""
+        if self.nm_color_mask_entry is not None:
+            target = (self.nm_color_mask_entry.get() or "").strip()
+        if not target:
+            target = "blue"
+        roi = ScreenRegion(left=0, top=0, width=self.original_image.width, height=self.original_image.height)
+        regions = self._nm_find_border_color_regions(self.original_image, roi, target, self._nm_get_color_max_area())
+        self.log(f"Border-color regions for '{target}': {len(regions)}", "info")
+        overlay = self._nm_draw_rects_overlay(self.original_image, regions, (0, 255, 0, 220), width=2)
+        self.current_image = overlay
+        self.update_displays()
         
     def encode_image(self, image):
         """Encode PIL Image to base64."""
@@ -4094,11 +4688,6 @@ Rules:
             self.log("OpenAI API key not configured – new method requires LLM access.", "error")
             return
 
-        # Prefer PaddleOCR for the new method when OCR is enabled
-        if self.nm_use_ocr_var.get() and not self.use_paddleocr:
-            self.use_paddleocr = True
-            self.paddleocr_ocr = None
-
         self.log("\n" + "=" * 60, "info")
         self.log(f"NEW METHOD: Planner → Deterministic → Picker → Verifier", "info")
         self.log(f"Instruction: {prompt}", "info")
@@ -4124,43 +4713,86 @@ Rules:
         roi_img = self._nm_draw_roi_overlay(snapshot.image, planner_roi)
         self._nm_add_stage(f"Planner ROI ({planner.location_intent.zone})", roi_img)
 
-        # Step 3–4: Deterministic candidate generation + packaging
-        candidates = self._nm_generate_candidates(snapshot, planner)
-        if not candidates:
-            self.log("Deterministic engine could not generate any candidates → UNSURE.", "error")
+        if not self.is_running:
+            self.log("Stopped by user.", "info")
             return
 
-        self.log(f"Deterministic engine produced {len(candidates)} candidates.", "info")
-        # Log top candidates for debugging
-        roi = self._nm_zone_to_roi(snapshot.image, snapshot.window_rect, planner.location_intent.zone)
-        features = self._nm_build_candidate_features(snapshot, roi, candidates)
-        top_candidates = candidates[:min(10, len(candidates))]
-        for c in top_candidates:
-            feat = features.get(c.id, {})
-            width_px = feat.get("width_px", 0)
-            height_px = feat.get("height_px", 0)
-            size_px_class = feat.get("size_px_class", "unknown")
-            color_group = feat.get("color_group", "unknown")
-            self.log(f"  Candidate {c.id}: text='{c.text}', score={c.total_score:.3f} "
-                    f"(text={c.scores.get('text_match', 0):.3f}, shape={c.scores.get('shape_plausibility', 0):.3f}, "
-                    f"color={color_group}, size={size_px_class} {width_px}x{height_px})",
-                    "info")
+        # Decide OCR usage based on planner text intent
+        has_text_intent = bool(planner.text_intent.primary_text or planner.text_intent.variants)
+        self.nm_use_ocr_var.set(has_text_intent)
+        self.nm_use_color_var.set(True)
+        self.nm_use_shape_var.set(False)
+
+        ocr_candidates: List[CandidatePackage] = []
+        good_ocr: List[CandidatePackage] = []
+        if has_text_intent:
+            self.log("Phase 1: OCR text search (planner includes text).", "info")
+            ocr_candidates = self._nm_generate_candidates(
+                snapshot,
+                planner,
+                force_use_ocr=True,
+                force_use_color=False,
+                force_use_shape=False,
+            )
+            ocr_candidates = [c for c in ocr_candidates if c.source == "ocr"]
+            good_ocr = self._nm_good_text_candidates(planner.text_intent, ocr_candidates)
+            if good_ocr:
+                self.log(f"OCR produced {len(good_ocr)} strong text candidates.", "info")
+            else:
+                self.log("OCR did not produce strong text matches.", "info")
+
+        if not self.is_running:
+            self.log("Stopped by user.", "info")
+            return
+
+        color_candidates: List[CandidatePackage] = []
+        if not good_ocr:
+            self.log("Phase 2: Color masking.", "info")
+            color_candidates = self._nm_generate_candidates(
+                snapshot,
+                planner,
+                force_use_ocr=False,
+                force_use_color=True,
+                force_use_shape=False,
+            )
+            color_candidates = [c for c in color_candidates if c.source == "color"]
+
+        # Choose candidate pool
+        if good_ocr:
+            candidates = good_ocr
+        else:
+            combined = ocr_candidates + color_candidates
+            if not combined:
+                self.log("No OCR or color candidates found → UNSURE.", "error")
+                return
+            candidates = self._nm_dedupe_candidates(combined)
+
+        # Reassign IDs to avoid collisions after combining sources
+        candidates = self._nm_reassign_candidate_ids(candidates)
+
+        # Score and sort
+        candidates = self._nm_score_candidates(snapshot, planner, candidates)
+        candidates.sort(key=lambda c: c.total_score, reverse=True)
+
         cand_overlay = self._nm_draw_candidates_overlay(snapshot.image, candidates, highlight_id=None, show_ids=True)
-        self._nm_add_stage("Candidates (deterministic)", cand_overlay)
+        self._nm_add_stage("Candidates (selected pool)", cand_overlay)
 
-        # Phase filtering: OCR first, then color/shape, then combine
-        filtered_candidates = self._nm_phase_filter_candidates(snapshot, planner, candidates)
-        if not filtered_candidates:
-            self.log("All candidates were filtered out - UNSURE.", "error")
+        # If we have exactly one strong OCR candidate, select it directly.
+        if good_ocr and len(candidates) == 1:
+            chosen = candidates[0]
+            self.log(f"Direct OCR match selected: ID={chosen.id} at {chosen.click_point}", "coords")
+            self._nm_show_virtual_click(snapshot, chosen, candidates)
+            verified = self._nm_verify(snapshot, planner, chosen)
+            if verified:
+                self.log("Verifier: PASS – chosen candidate is consistent with planner intent.", "success")
+            else:
+                self.log("Verifier: UNSURE – candidate did not clearly satisfy planner intent.", "error")
             return
-
-        # Score and sort within the filtered set
-        scored_candidates = self._nm_score_candidates(snapshot, planner, filtered_candidates)
-        candidates = scored_candidates
-        filtered_overlay = self._nm_draw_candidates_overlay(snapshot.image, candidates, highlight_id=None, show_ids=True)
-        self._nm_add_stage("Candidates (after phase filters)", filtered_overlay)
 
         # Step 5: Picker AI (forced choice among candidates)
+        if not self.is_running:
+            self.log("Stopped by user.", "info")
+            return
         choice = self._nm_picker_ai(snapshot, planner, candidates)
         if choice is None:
             self.log("Picker returned UNSURE – no candidate selected.", "error")
@@ -4241,6 +4873,9 @@ Rules:
 - Do NOT guess.
 - You only describe: text, approximate location, and visual cues.
 - If a field is uncertain, set it to "unknown".
+- You are locating WHAT to click to achieve the user's goal. If clicking text inside the target is the fastest path, set text_intent accordingly.
+- Example: if the goal is "search bar", you can target the visible placeholder/label text inside the search input.
+- Example: to close a tab, the clickable target may be a small "X" icon; text_intent can be "x".
 
 You are given:
 - A UI screenshot (as an image)
@@ -4256,6 +4891,13 @@ Your job:
    - scope: "window" or "screen"
    - zone: one of ["top_bar", "sidebar", "footer", "center", "any"]
    - position: one of ["top_left", "top", "top_right", "left", "center", "right", "bottom_left", "bottom", "bottom_right", "any"]
+
+Zone definitions (approximate, with overlap):
+- top_bar: top ~30% of the window (overlaps downwards)
+- sidebar: left ~35% of the window (overlaps rightwards)
+- footer: bottom ~25% of the window (overlaps upwards)
+- center: middle ~90% of the window (very wide; includes edges)
+- any: full window
 
 3) Describe the VISUAL INTENT (use these for deterministic filtering):
    - description: a short plain-language description of the element's look
@@ -4317,40 +4959,89 @@ Schema:
                 f"Image: {snapshot.image.width}x{snapshot.image.height}."
             )
 
-            response = self.client.chat.completions.create(
-                model="gpt-5.2",
-                max_completion_tokens=500,  # Reduced - structured JSON is concise
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/png;base64,{image_b64}",
-                                    "detail": "high",  # High detail needed for accurate text and UI element recognition
+            plan_dict = None
+            attempts = [
+                {"detail": "high"},
+                {"detail": "low"},
+            ]
+            models = ["gpt-5.2"]
+
+            for model_name in models:
+                for attempt_idx, attempt in enumerate(attempts, start=1):
+                    try:
+                        response = self.client.chat.completions.create(
+                            model=model_name,
+                            max_completion_tokens=500,  # Reduced - structured JSON is concise
+                            response_format={"type": "json_object"},
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": user_prompt},
+                                        {
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": f"data:image/png;base64,{image_b64}",
+                                                "detail": attempt["detail"],
+                                            },
+                                        },
+                                    ],
                                 },
-                            },
-                        ],
-                    },
-                ],
-            )
-            raw_text = response.choices[0].message.content or ""
-            self.log(f"Planner raw response: {raw_text}", "ai")
+                            ],
+                        )
+                    except Exception as e:
+                        msg = str(e)
+                        if "response_format" in msg or "json_object" in msg:
+                            response = self.client.chat.completions.create(
+                                model=model_name,
+                                max_completion_tokens=500,
+                                messages=[
+                                    {"role": "system", "content": system_prompt},
+                                    {
+                                        "role": "user",
+                                        "content": [
+                                            {"type": "text", "text": user_prompt},
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {
+                                                    "url": f"data:image/png;base64,{image_b64}",
+                                                    "detail": attempt["detail"],
+                                                },
+                                            },
+                                        ],
+                                    },
+                                ],
+                            )
+                        else:
+                            raise
+                    raw_text = response.choices[0].message.content or ""
+                    self.log(f"Planner raw response (model={model_name}, attempt {attempt_idx}): {raw_text}", "ai")
 
-            try:
-                plan_dict = json.loads(raw_text)
-            except json.JSONDecodeError:
-                # Try to extract JSON object
-                import re
+                    if not raw_text.strip():
+                        self.log("Planner response was empty; retrying...", "error")
+                        continue
 
-                m = re.search(r"\{[\s\S]*\}", raw_text)
-                if not m:
-                    self.log("Planner response was not valid JSON and no object could be extracted.", "error")
-                    return None
-                plan_dict = json.loads(m.group(0))
+                    try:
+                        plan_dict = json.loads(raw_text)
+                        break
+                    except json.JSONDecodeError:
+                        # Try to extract JSON object
+                        import re
+
+                        m = re.search(r"\{[\s\S]*\}", raw_text)
+                        if not m:
+                            self.log("Planner response was not valid JSON and no object could be extracted.", "error")
+                            continue
+                        plan_dict = json.loads(m.group(0))
+                        break
+
+                if plan_dict is not None:
+                    break
+                self.log(f"Planner returned empty response with model {model_name}.", "error")
+
+            if plan_dict is None:
+                return None
 
             decision = str(plan_dict.get("decision", "UNSURE")).upper()
 
@@ -4424,27 +5115,37 @@ Schema:
         if zone not in {"top_bar", "sidebar", "footer", "center"}:
             return ScreenRegion(left=left, top=top, width=width, height=height)
 
+        overlap_x = int(width * 0.08)
+        overlap_y = int(height * 0.08)
+
+        def clamp_rect(l: int, t: int, r: int, b: int) -> ScreenRegion:
+            l2 = max(left, l - overlap_x)
+            t2 = max(top, t - overlap_y)
+            r2 = min(right, r + overlap_x)
+            b2 = min(bottom, b + overlap_y)
+            return ScreenRegion(left=l2, top=t2, width=max(1, r2 - l2), height=max(1, b2 - t2))
+
         if zone == "top_bar":
-            # More comprehensive top bar - include title bar and ribbon area
-            h = int(height * 0.25)  # Increased from 0.2 to catch more
-            return ScreenRegion(left=left, top=top, width=width, height=max(1, h))
+            # Wider top bar to avoid missing edge items
+            h = int(height * 0.30)
+            return clamp_rect(left, top, right, top + h)
         if zone == "sidebar":
-            w = int(width * 0.25)
-            return ScreenRegion(left=left, top=top, width=max(1, w), height=height)
+            w = int(width * 0.35)
+            return clamp_rect(left, top, left + w, bottom)
         if zone == "footer":
-            h = int(height * 0.2)
-            return ScreenRegion(left=left, top=bottom - h, width=width, height=max(1, h))
+            h = int(height * 0.25)
+            return clamp_rect(left, bottom - h, right, bottom)
         if zone == "center":
-            w = int(width * 0.6)
-            h = int(height * 0.6)
+            # Much wider center region to include edges
+            w = int(width * 0.90)
+            h = int(height * 0.90)
             cx = left + width // 2
             cy = top + height // 2
-            return ScreenRegion(
-                left=cx - w // 2,
-                top=cy - h // 2,
-                width=max(1, w),
-                height=max(1, h),
-            )
+            l = cx - w // 2
+            t = cy - h // 2
+            r = cx + w // 2
+            b = cy + h // 2
+            return clamp_rect(l, t, r, b)
 
         # Fallback
         return ScreenRegion(left=left, top=top, width=width, height=height)
@@ -4623,6 +5324,45 @@ Schema:
 
         return 0.0
 
+    def _nm_text_match_threshold(self, intent: PlannerTextIntent) -> float:
+        strict = (intent.strictness or "medium").lower()
+        if strict == "high":
+            return 0.9
+        if strict == "low":
+            return 0.75
+        return 0.85
+
+    def _nm_good_text_candidates(
+        self,
+        intent: PlannerTextIntent,
+        candidates: List[CandidatePackage],
+    ) -> List[CandidatePackage]:
+        """Filter OCR candidates to only strong text matches."""
+        query = (intent.primary_text or "").strip().lower()
+        if not query:
+            return []
+
+        threshold = self._nm_text_match_threshold(intent)
+        good = []
+        short_query = len(query) <= 2
+        for c in candidates:
+            if not c.text:
+                continue
+            cand_text = c.text.strip().lower()
+            if short_query:
+                if cand_text != query:
+                    continue
+                good.append(c)
+            else:
+                if c.scores.get("text_match", 0.0) >= threshold:
+                    good.append(c)
+        return good
+
+    def _nm_reassign_candidate_ids(self, candidates: List[CandidatePackage]) -> List[CandidatePackage]:
+        for i, c in enumerate(candidates, start=1):
+            c.id = i
+        return candidates
+
     def _nm_luminance(self, rgb: Tuple[int, int, int]) -> float:
         r, g, b = rgb
         return (0.2126 * (r / 255.0)) + (0.7152 * (g / 255.0)) + (0.0722 * (b / 255.0))
@@ -4794,23 +5534,23 @@ Schema:
         if position in {"", "any", "unknown"}:
             return True
         if position == "top":
-            return y_norm <= 0.4
+            return y_norm <= 0.45
         if position == "bottom":
-            return y_norm >= 0.6
+            return y_norm >= 0.55
         if position == "left":
-            return x_norm <= 0.4
+            return x_norm <= 0.45
         if position == "right":
-            return x_norm >= 0.6
+            return x_norm >= 0.55
         if position == "center":
-            return 0.25 <= x_norm <= 0.75 and 0.25 <= y_norm <= 0.75
+            return 0.2 <= x_norm <= 0.8 and 0.2 <= y_norm <= 0.8
         if position == "top_left":
-            return x_norm <= 0.4 and y_norm <= 0.4
+            return x_norm <= 0.45 and y_norm <= 0.45
         if position == "top_right":
-            return x_norm >= 0.6 and y_norm <= 0.4
+            return x_norm >= 0.55 and y_norm <= 0.45
         if position == "bottom_left":
-            return x_norm <= 0.4 and y_norm >= 0.6
+            return x_norm <= 0.45 and y_norm >= 0.55
         if position == "bottom_right":
-            return x_norm >= 0.6 and y_norm >= 0.6
+            return x_norm >= 0.55 and y_norm >= 0.55
         return True
 
     def _nm_build_candidate_features(
@@ -4923,6 +5663,9 @@ Schema:
         snapshot: NewMethodSnapshot,
         planner: PlannerOutput,
         candidates: List[CandidatePackage],
+        force_use_ocr: Optional[bool] = None,
+        force_use_color: Optional[bool] = None,
+        force_use_shape: Optional[bool] = None,
     ) -> List[CandidatePackage]:
         if not candidates:
             return []
@@ -5440,31 +6183,50 @@ Schema:
         target_color: str,
         accent_color_relevant: bool,
         max_area: int,
-    ) -> List[Tuple[int, int, int, int]]:
+        return_masks: bool = False,
+    ) -> List[Tuple[int, int, int, int]] | Tuple[List[Tuple[int, int, int, int]], List["np.ndarray"]]:
         """Find connected regions matching a target color mask."""
         masks_u8 = self._nm_build_color_masks(image, roi, target_color, accent_color_relevant)
         if not masks_u8:
-            return []
+            return ([], []) if return_masks else []
 
         try:
             import cv2
+            import numpy as np
         except Exception:
             self.log("OpenCV (cv2) is not available; color-region detection is disabled.", "error")
-            return []
+            return ([], []) if return_masks else []
 
         regions: List[Tuple[int, int, int, int]] = []
         roi_area = max(1, (roi.right - roi.left) * (roi.bottom - roi.top))
         min_area = max(25, int(roi_area * 0.00005))
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+        # Combine masks for later ratio checks
+        combined_mask = np.zeros_like(masks_u8[0], dtype=np.uint8)
+        for m in masks_u8:
+            if m is not None:
+                combined_mask = np.maximum(combined_mask, m)
 
         for mask_u8 in masks_u8:
             if mask_u8 is None:
                 continue
             work = mask_u8.copy()
-            work = cv2.morphologyEx(work, cv2.MORPH_CLOSE, kernel, iterations=1)
-            work = cv2.morphologyEx(work, cv2.MORPH_OPEN, kernel, iterations=1)
-            work = cv2.dilate(work, dilate_kernel, iterations=1)
+            try:
+                import numpy as np
+                area_ratio = float(np.count_nonzero(work)) / float(work.size)
+            except Exception:
+                area_ratio = 0.0
+            if area_ratio >= 0.15:
+                # Large masks should not be expanded; tighten them to avoid merges.
+                work = cv2.morphologyEx(work, cv2.MORPH_OPEN, kernel_small, iterations=1)
+                work = cv2.erode(work, kernel_small, iterations=1)
+            else:
+                work = cv2.morphologyEx(work, cv2.MORPH_CLOSE, kernel, iterations=1)
+                work = cv2.morphologyEx(work, cv2.MORPH_OPEN, kernel, iterations=1)
+                work = cv2.dilate(work, dilate_kernel, iterations=1)
 
             contours, _ = cv2.findContours(work, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             for cnt in contours:
@@ -5483,6 +6245,54 @@ Schema:
                 r = min(roi.right - roi.left, x + w + pad_out)
                 b = min(roi.bottom - roi.top, y + h + pad_out)
                 regions.append((roi.left + l, roi.top + t, roi.left + r, roi.top + b))
+
+        # Border-based detection: find rectangular edges and keep those with strong color inside.
+        try:
+            roi_img = image.crop((roi.left, roi.top, roi.right, roi.bottom)).convert("RGB")
+            roi_arr = np.array(roi_img)
+            gray = cv2.cvtColor(roi_arr, cv2.COLOR_RGB2GRAY)
+            edges = cv2.Canny(gray, 50, 150)
+
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for cnt in contours:
+                x, y, w, h = cv2.boundingRect(cnt)
+                area = w * h
+                if area < min_area:
+                    continue
+                if max_area > 0 and area > max_area:
+                    continue
+                if w < 30 or h < 12:
+                    continue
+
+                # Ratio of target color inside the rectangle
+                rect_mask = combined_mask[y:y + h, x:x + w]
+                if rect_mask.size == 0:
+                    continue
+                color_ratio = float(np.count_nonzero(rect_mask)) / float(rect_mask.size)
+                if color_ratio < 0.12:
+                    continue
+
+                # Border edge density (approximate "hard border")
+                rect = np.ones((h, w), dtype=np.uint8)
+                inner = cv2.erode(rect, np.ones((3, 3), dtype=np.uint8), iterations=1)
+                border = rect - inner
+                border_edges = edges[y:y + h, x:x + w]
+                border_count = int(np.count_nonzero(border))
+                if border_count == 0:
+                    continue
+                border_ratio = float(np.count_nonzero(border_edges[border == 1])) / float(border_count)
+                if border_ratio < 0.15:
+                    continue
+
+                regions.append((roi.left + x, roi.top + y, roi.left + x + w, roi.top + y + h))
+        except Exception:
+            # Best-effort only; ignore border detection failures.
+            pass
+
+        # Additional border-first rectangles that match target color (handles blue surrounded by blue)
+        border_color_regions = self._nm_find_border_color_regions(image, roi, target_color, max_area)
+        if border_color_regions:
+            regions.extend(border_color_regions)
 
         # Merge very-close regions to handle tight multi-part icons (e.g., Windows logo)
         def merge_close(regs: List[Tuple[int, int, int, int]], gap: int) -> List[Tuple[int, int, int, int]]:
@@ -5514,6 +6324,76 @@ Schema:
             return merged
 
         regions = merge_close(regions, gap=3)
+
+        return (regions, masks_u8) if return_masks else regions
+
+    def _nm_find_border_color_regions(
+        self,
+        image: Image.Image,
+        roi: ScreenRegion,
+        target_color: str,
+        max_area: int,
+    ) -> List[Tuple[int, int, int, int]]:
+        """Detect hard-bordered rectangles and keep those whose interior matches target color."""
+        color = self._nm_normalize_color(target_color)
+        if color in {"", "unknown"}:
+            return []
+
+        try:
+            import cv2
+            import numpy as np
+        except Exception:
+            return []
+
+        roi_img = image.crop((roi.left, roi.top, roi.right, roi.bottom)).convert("RGB")
+        roi_arr = np.array(roi_img)
+        gray = cv2.cvtColor(roi_arr, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 60, 180)
+
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        regions: List[Tuple[int, int, int, int]] = []
+        roi_area = max(1, (roi.right - roi.left) * (roi.bottom - roi.top))
+        min_area = max(25, int(roi_area * 0.00005))
+
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            area = w * h
+            if area < min_area:
+                continue
+            if max_area > 0 and area > max_area:
+                continue
+            if w < 30 or h < 12:
+                continue
+
+            # Border edge density to ensure "hard border"
+            border = np.zeros((h, w), dtype=np.uint8)
+            border[:2, :] = 1
+            border[-2:, :] = 1
+            border[:, :2] = 1
+            border[:, -2:] = 1
+            border_edges = edges[y:y + h, x:x + w]
+            border_count = int(np.count_nonzero(border))
+            if border_count == 0:
+                continue
+            border_ratio = float(np.count_nonzero(border_edges[border == 1])) / float(border_count)
+            if border_ratio < 0.10:
+                continue
+
+            # Color check inside (ignore border)
+            pad = 2
+            ix0 = max(0, x + pad)
+            iy0 = max(0, y + pad)
+            ix1 = min(roi_arr.shape[1], x + w - pad)
+            iy1 = min(roi_arr.shape[0], y + h - pad)
+            if ix1 <= ix0 or iy1 <= iy0:
+                continue
+            region = roi_arr[iy0:iy1, ix0:ix1]
+            avg = tuple(np.mean(region.reshape(-1, 3), axis=0).astype(int))
+            group = self._nm_color_group(avg)
+            if not self._nm_color_matches(color, group):
+                continue
+
+            regions.append((roi.left + x, roi.top + y, roi.left + x + w, roi.top + y + h))
 
         return regions
 
@@ -5640,7 +6520,9 @@ Schema:
                             (delta_b >= settings["blue_contrast"]["delta_b"]) |
                             (delta_h >= settings["blue_contrast"]["delta_h"])
                         )
-                        mask = mask & contrast_ok
+                        # Allow solid, saturated blues even if interior contrast is low.
+                        strong_keep = strong & b_dom
+                        mask = mask & (contrast_ok | strong_keep)
                     except Exception:
                         pass
                 elif color == "purple":
@@ -5669,8 +6551,161 @@ Schema:
             if masks is not None:
                 masks = [(m & (~exclude_grid)) for m in masks]
 
+        # If a single mask covers too much area, split by HSV clusters
+        if mask is not None and masks is None:
+            try:
+                import numpy as np
+                area_ratio = float(np.count_nonzero(mask)) / float(mask.size)
+            except Exception:
+                area_ratio = 0.0
+            if area_ratio >= 0.08:
+                base_mask = mask
+                splits = self._nm_split_mask_by_hsv(roi_array, base_mask, max_clusters=3)
+                if splits:
+                    masks = [base_mask] + splits
+                    mask = None
+                # For blue, also split by brightness to separate light vs dark blues.
+                if color == "blue":
+                    try:
+                        import numpy as np
+                        hsv = cv2.cvtColor(roi_array, cv2.COLOR_RGB2HSV)
+                        v = hsv[:, :, 2]
+                        v_vals = v[base_mask]
+                        if v_vals.size > 0:
+                            p40 = int(np.percentile(v_vals, 40))
+                            p60 = int(np.percentile(v_vals, 60))
+                            dark = base_mask & (v <= p40)
+                            light = base_mask & (v >= p60)
+                            min_pixels = max(200, int(base_mask.size * 0.002))
+                            extra = []
+                            if np.count_nonzero(dark) >= min_pixels:
+                                extra.append(dark)
+                            if np.count_nonzero(light) >= min_pixels:
+                                extra.append(light)
+                            if extra:
+                                if masks is None:
+                                    masks = [base_mask] + extra
+                                    mask = None
+                                else:
+                                    masks.extend(extra)
+
+                        # Strong-blue core: isolate the most saturated/blue-dominant pixels
+                        r = roi_array[:, :, 0].astype(np.int16)
+                        g = roi_array[:, :, 1].astype(np.int16)
+                        b = roi_array[:, :, 2].astype(np.int16)
+                        s = hsv[:, :, 1].astype(np.int16)
+                        v_i = hsv[:, :, 2].astype(np.int16)
+                        s_blur = cv2.blur(hsv[:, :, 1], (21, 21)).astype(np.int16)
+                        v_blur = cv2.blur(hsv[:, :, 2], (21, 21)).astype(np.int16)
+                        score = (b - ((r + g) // 2)) + (s // 2) + (s - s_blur) + (v_blur - v_i)
+                        strong = self._nm_extract_strong_mask(base_mask, score, min_pixels=200, max_ratio=0.35)
+                        if strong is not None:
+                            if masks is None:
+                                masks = [base_mask, strong]
+                                mask = None
+                            else:
+                                masks.append(strong)
+                    except Exception:
+                        pass
+
         masks_to_process = masks if masks is not None else [mask]
         return [(m.astype(np.uint8) * 255) for m in masks_to_process if m is not None]
+
+    def _nm_split_mask_by_hsv(
+        self,
+        roi_array: "np.ndarray",
+        mask: "np.ndarray",
+        max_clusters: int = 3,
+    ) -> List["np.ndarray"]:
+        """Split a large color mask into clusters by HSV (helps separate similar blues)."""
+        try:
+            import cv2
+            import numpy as np
+        except Exception:
+            return []
+
+        coords = np.column_stack(np.where(mask))
+        total = coords.shape[0]
+        if total < 500:
+            return []
+
+        hsv = cv2.cvtColor(roi_array, cv2.COLOR_RGB2HSV)
+        hsv_masked = hsv[mask].astype(np.float32)
+
+        # Sample for k-means
+        sample_n = min(6000, total)
+        rng = np.random.default_rng(42)
+        sample_idx = rng.choice(total, size=sample_n, replace=False)
+        sample = hsv_masked[sample_idx]
+
+        # Normalize to [0,1]
+        sample_nrm = np.column_stack([
+            sample[:, 0] / 179.0,
+            sample[:, 1] / 255.0,
+            sample[:, 2] / 255.0,
+        ]).astype(np.float32)
+
+        # Choose cluster count
+        k = 2
+        if total > (mask.size * 0.25):
+            k = min(max_clusters, 3)
+
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 0.01)
+        try:
+            _compact, _labels, centers = cv2.kmeans(
+                sample_nrm, k, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+            )
+        except Exception:
+            return []
+
+        # Assign all masked pixels to nearest center
+        all_nrm = np.column_stack([
+            hsv_masked[:, 0] / 179.0,
+            hsv_masked[:, 1] / 255.0,
+            hsv_masked[:, 2] / 255.0,
+        ]).astype(np.float32)
+        dists = np.sum((all_nrm[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+        labels_all = np.argmin(dists, axis=1)
+
+        submasks: List[np.ndarray] = []
+        min_pixels = max(150, int(total * 0.03))
+        for i in range(k):
+            idxs = labels_all == i
+            if np.count_nonzero(idxs) < min_pixels:
+                continue
+            sub = np.zeros(mask.shape, dtype=bool)
+            sub[coords[idxs, 0], coords[idxs, 1]] = True
+            submasks.append(sub)
+
+        return submasks
+
+    def _nm_extract_strong_mask(
+        self,
+        base_mask: "np.ndarray",
+        score: "np.ndarray",
+        min_pixels: int = 200,
+        max_ratio: float = 0.45,
+    ) -> Optional["np.ndarray"]:
+        """Extract a smaller submask using high-percentile score values."""
+        try:
+            import numpy as np
+        except Exception:
+            return None
+
+        vals = score[base_mask]
+        if vals.size < min_pixels:
+            return None
+        base_area = float(vals.size)
+        for pct in (80, 85, 90, 93, 95):
+            try:
+                thr = np.percentile(vals, pct)
+            except Exception:
+                continue
+            strong = base_mask & (score >= thr)
+            area = int(np.count_nonzero(strong))
+            if area >= min_pixels and area <= base_area * max_ratio:
+                return strong
+        return None
 
     def _nm_run_paddleocr_roi(
         self,
@@ -5752,9 +6787,9 @@ Schema:
         )
 
         # 3.2 Feature extraction – OCR with multiple strategies to catch more text
-        use_ocr = self.nm_use_ocr_var.get()
-        use_color = self.nm_use_color_var.get()
-        use_shape = self.nm_use_shape_var.get()
+        use_ocr = self.nm_use_ocr_var.get() if force_use_ocr is None else bool(force_use_ocr)
+        use_color = self.nm_use_color_var.get() if force_use_color is None else bool(force_use_color)
+        use_shape = self.nm_use_shape_var.get() if force_use_shape is None else bool(force_use_shape)
         ocr_result = None
         if use_ocr:
             if self.use_paddleocr and self.init_paddleocr():
@@ -5785,27 +6820,28 @@ Schema:
                 )
                 self.log(f"OCR (standard) in ROI produced {len(ocr_result.matches)} text matches.", "info")
 
-                # Also try with preprocessing for better detection of faint text/placeholders
-                try:
-                    ocr_result_preprocessed = ocr_engine.process_with_preprocessing(
-                        roi_crop,
-                        offset=(roi.left, roi.top),
-                        include_phrases=False,
-                    )
-                    # Merge results, preferring higher confidence matches
-                    all_matches = {}
-                    for match in ocr_result.matches:
-                        key = (match.bbox.left, match.bbox.top, match.text)
-                        if key not in all_matches or match.confidence > all_matches[key].confidence:
-                            all_matches[key] = match
-                    for match in ocr_result_preprocessed.matches:
-                        key = (match.bbox.left, match.bbox.top, match.text)
-                        if key not in all_matches or match.confidence > all_matches[key].confidence:
-                            all_matches[key] = match
-                    ocr_result.matches = list(all_matches.values())
-                    self.log(f"OCR (with preprocessing) found {len(ocr_result.matches)} total unique matches.", "info")
-                except Exception as e:
-                    self.log(f"Preprocessed OCR failed: {e}, using standard OCR only", "info")
+                # Optional preprocessing pass (skip in fast mode)
+                if not self.ocr_fast_mode:
+                    try:
+                        ocr_result_preprocessed = ocr_engine.process_with_preprocessing(
+                            roi_crop,
+                            offset=(roi.left, roi.top),
+                            include_phrases=False,
+                        )
+                        # Merge results, preferring higher confidence matches
+                        all_matches = {}
+                        for match in ocr_result.matches:
+                            key = (match.bbox.left, match.bbox.top, match.text)
+                            if key not in all_matches or match.confidence > all_matches[key].confidence:
+                                all_matches[key] = match
+                        for match in ocr_result_preprocessed.matches:
+                            key = (match.bbox.left, match.bbox.top, match.text)
+                            if key not in all_matches or match.confidence > all_matches[key].confidence:
+                                all_matches[key] = match
+                        ocr_result.matches = list(all_matches.values())
+                        self.log(f"OCR (with preprocessing) found {len(ocr_result.matches)} total unique matches.", "info")
+                    except Exception as e:
+                        self.log(f"Preprocessed OCR failed: {e}, using standard OCR only", "info")
         else:
             from agent.ocr import OCRResult
             ocr_result = OCRResult(matches=[], raw_text="")
@@ -5947,15 +6983,21 @@ Schema:
             dist_norm = math.sqrt(dx * dx + dy * dy)
             location_score = max(0.0, 1.0 - dist_norm)
 
+            area_ratio = area / roi_area
             scores = {
                 "text_match": 0.0,
                 "shape_plausibility": shape_score,
                 "location_match": location_score,
             }
 
+            size_penalty = 0.0
+            if area_ratio > 0.25:
+                size_penalty = min(1.5, (area_ratio - 0.25) * 4.0)
+
             total = (
                 scores["shape_plausibility"] * 0.6
                 + scores["location_match"] * 0.4
+                - size_penalty
             )
 
             candidates.append(
@@ -7122,7 +8164,7 @@ If there's any visible offset, return false with precise adjustment values."""
         self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
         
     def start_finding(self):
-        """Start the coordinate finding process (colored band narrowing method)."""
+        """Start the single-pass planner → OCR/color → picker pipeline."""
         prompt = self.prompt_entry.get().strip()
         if not prompt:
             self.log("Please enter what you want to click!", 'error')
@@ -7136,42 +8178,26 @@ If there's any visible offset, return false with precise adjustment values."""
             self.log("OpenAI API key not configured!", 'error')
             self.log("Please add your key to the .env file and restart", 'error')
             return
-        
-        # Get and validate max iterations
-        try:
-            max_iterations = int(self.max_iter_entry.get().strip())
-            if max_iterations < 1:
-                raise ValueError("Max iterations must be at least 1")
-            if max_iterations > 50:
-                self.log("Warning: Max iterations > 50 may take a long time", 'error')
-                return
-        except ValueError as e:
-            self.log(f"Invalid max iterations: {e}. Please enter a number between 1 and 50.", 'error')
+
+        if self.is_running:
+            self.log("Already running.", 'info')
             return
-        
-        # Get and validate number of lines per step
-        try:
-            num_lines = int(self.lines_entry.get().strip())
-            if num_lines < 2:
-                raise ValueError("Lines per step must be at least 2")
-            if num_lines > len(self.line_colors):
-                num_lines = len(self.line_colors)
-        except ValueError as e:
-            self.log(f"Invalid lines per step: {e}.", 'error')
-            return
-            
+
+        self.is_running = True
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        
+
         self.log(f"\n{'='*50}", 'info')
-        self.log(f"STARTING COLORED-LINES BAND SEARCH: '{prompt}'", 'info')
-        self.log(f"Max iterations: {max_iterations}", 'info')
-        self.log(f"Lines per step: {num_lines}", 'info')
+        self.log(f"STARTING PLANNER → OCR/COLOR → PICKER: '{prompt}'", 'info')
         self.log(f"{'='*50}\n", 'info')
-        
-        # Run in separate thread (reuse grid_x as num_lines argument)
-        thread = threading.Thread(target=self.run_finding_process, args=(prompt, max_iterations, num_lines, 0), daemon=True)
-        thread.start()
+
+        def worker():
+            try:
+                self.run_new_method_once()
+            finally:
+                self.finish_finding(True)
+
+        threading.Thread(target=worker, daemon=True).start()
         
     def stop_finding(self):
         """Stop the finding process."""
