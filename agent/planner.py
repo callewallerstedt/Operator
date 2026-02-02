@@ -12,7 +12,15 @@ from PIL import Image
 from openai import OpenAI
 
 from .config import config
-from .actions import PlannerResponse, AgentAction, parse_action_from_dict
+from .actions import (
+    PlannerResponse,
+    AgentAction,
+    parse_action_from_dict,
+    OCRClickAction,
+    SmartClickAction,
+    ChainAction,
+    ChainedStep,
+)
 from .screenshot import get_screen_capture
 
 
@@ -93,6 +101,11 @@ Windows search works best with actual application names. Look at the screenshot 
 2. **Chain actions** - Combine related actions (open menu + type + enter)
 3. **Smart click** - FOR ALL BUTTON CLICKS - AI vision finds the right button
 4. **Mouse click** - Only if you can see exact coordinates from the screenshot
+
+## OCR Click Rules (IMPORTANT)
+- Use ocr_click ONLY when the target is visible text on the screen.
+- If the user mentions "logo", "icon", "symbol", or the target is clearly non-text, do NOT use ocr_click.
+- If there is no visible text (OCR summary empty), do NOT use ocr_click.
 
 ## Action Types
 
@@ -314,7 +327,68 @@ IMPORTANT:
         
         # Parse the response
         response_text = response.choices[0].message.content.strip()
-        return self._parse_response(response_text)
+        parsed = self._parse_response(response_text)
+        return self._validate_response(parsed, state)
+
+    def _should_avoid_ocr(self, target_text: Optional[str], state: AgentState) -> bool:
+        task_lower = (state.task or "").lower()
+        if any(word in task_lower for word in ("logo", "icon", "symbol", "avatar", "badge")):
+            return True
+        ocr_summary = (state.ocr_summary or "").strip()
+        if not ocr_summary:
+            return True
+        if target_text:
+            if target_text.lower() not in ocr_summary.lower():
+                return True
+        return False
+
+    def _ocr_to_smart_click(self, target_text: Optional[str], state: AgentState) -> SmartClickAction:
+        task_target = (state.task or "").strip()
+        if task_target:
+            target = task_target
+        elif target_text:
+            target = f"{target_text} icon or label"
+        else:
+            target = "the requested target"
+        return SmartClickAction(
+            target=target,
+            prefer_primary=True,
+            button="left",
+            clicks=1,
+            description=f"Click {target}",
+        )
+
+    def _validate_response(self, response: PlannerResponse, state: AgentState) -> PlannerResponse:
+        action = response.action
+        if isinstance(action, OCRClickAction):
+            if self._should_avoid_ocr(action.text, state):
+                response.action = self._ocr_to_smart_click(action.text, state)
+            return response
+
+        if isinstance(action, ChainAction):
+            updated = False
+            new_steps = []
+            for step in action.steps:
+                if step.action_type == "ocr_click":
+                    if self._should_avoid_ocr(step.text, state):
+                        target = (state.task or "").strip() or (step.text or "the requested target")
+                        new_steps.append(
+                            ChainedStep(
+                                action_type="smart_click",
+                                text=target,
+                                target=target,
+                                button=step.button or "left",
+                                clicks=step.clicks or 1,
+                                delay_after=step.delay_after,
+                            )
+                        )
+                        updated = True
+                        continue
+                new_steps.append(step)
+            if updated:
+                action.steps = new_steps
+                response.action = action
+        return response
     
     def _parse_response(self, response_text: str) -> PlannerResponse:
         """Parse the LLM response into a PlannerResponse."""

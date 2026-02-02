@@ -196,11 +196,16 @@ class CoordinateFinderApp:
         self.nm_use_shape_var = tk.BooleanVar(value=True)
         self.nm_color_mask_entry = None
         self.nm_color_max_area_entry = None
+        self.nm_color_split_entry = None
+        self.nm_color_min_area_entry = None
+        self.roi_settings_path = os.path.join(os.getcwd(), "roi_settings.json")
+        self.nm_roi_settings = self._nm_load_roi_settings()
         self.nm_ocr_match_entry = None
         self.nm_size_var = tk.StringVar(value="any")
         self.nm_position_var = tk.StringVar(value="any")
         self.nm_sample_mode = False
         self.nm_color_settings = self._nm_color_settings_defaults()
+        self.nm_color_split_keep = 2
 
         # Manual-step pipeline state (debug/interactive)
         self._nm_stage_add_disabled = False
@@ -403,6 +408,20 @@ class CoordinateFinderApp:
         )
         self.border_color_btn.grid(row=0, column=0, sticky="w", padx=(0, 10))
 
+        self.roi_editor_btn = tk.Button(
+            debug_btn_frame,
+            text="ROI Editor",
+            command=self.open_roi_editor,
+            bg='#1f6feb',
+            fg='white',
+            font=('Segoe UI', 10, 'bold'),
+            relief=tk.FLAT,
+            cursor='hand2',
+            padx=12,
+            pady=8,
+        )
+        self.roi_editor_btn.grid(row=0, column=1, sticky="w")
+
         # New method filter toggles
         toggle_frame = ttk.Frame(input_card, style='Card.TFrame')
         toggle_frame.pack(fill=tk.X, pady=(10, 0))
@@ -452,6 +471,36 @@ class CoordinateFinderApp:
         self.nm_color_max_area_entry.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0))
         self.nm_color_max_area_entry.insert(0, "40000")
 
+        ttk.Label(color_mask_frame, text="Min area:", style='Dark.TLabel').grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.nm_color_min_area_entry = tk.Entry(
+            color_mask_frame,
+            font=('Segoe UI', 10),
+            bg='#21262d',
+            fg='#c9d1d9',
+            insertbackground='#58a6ff',
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground='#30363d',
+            highlightcolor='#58a6ff',
+        )
+        self.nm_color_min_area_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(6, 0))
+        self.nm_color_min_area_entry.insert(0, "6")
+
+        ttk.Label(color_mask_frame, text="Use splits (e.g. blue=3):", style='Dark.TLabel').grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.nm_color_split_entry = tk.Entry(
+            color_mask_frame,
+            font=('Segoe UI', 10),
+            bg='#21262d',
+            fg='#c9d1d9',
+            insertbackground='#58a6ff',
+            relief=tk.FLAT,
+            highlightthickness=1,
+            highlightbackground='#30363d',
+            highlightcolor='#58a6ff',
+        )
+        self.nm_color_split_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(6, 0))
+        self.nm_color_split_entry.insert(0, "blue=3")
+
         color_mask_frame.columnconfigure(1, weight=1)
 
         # Color mask debug button
@@ -467,7 +516,7 @@ class CoordinateFinderApp:
             padx=12,
             pady=8
         )
-        self.color_mask_btn.grid(row=2, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
+        self.color_mask_btn.grid(row=4, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
 
         self.color_mask_debug_btn = tk.Button(
             color_mask_frame,
@@ -481,7 +530,7 @@ class CoordinateFinderApp:
             padx=12,
             pady=8
         )
-        self.color_mask_debug_btn.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        self.color_mask_debug_btn.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
         self.color_mask_settings_btn = tk.Button(
             color_mask_frame,
@@ -495,7 +544,7 @@ class CoordinateFinderApp:
             padx=12,
             pady=8
         )
-        self.color_mask_settings_btn.grid(row=3, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
+        self.color_mask_settings_btn.grid(row=5, column=0, sticky="w", padx=(0, 10), pady=(8, 0))
 
         self.hue_editor_btn = tk.Button(
             color_mask_frame,
@@ -509,7 +558,7 @@ class CoordinateFinderApp:
             padx=12,
             pady=8
         )
-        self.hue_editor_btn.grid(row=3, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        self.hue_editor_btn.grid(row=5, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
         self.sample_color_btn = tk.Button(
             color_mask_frame,
@@ -523,7 +572,7 @@ class CoordinateFinderApp:
             padx=12,
             pady=8
         )
-        self.sample_color_btn.grid(row=4, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        self.sample_color_btn.grid(row=6, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
         # OCR match override input
         ocr_match_frame = ttk.Frame(input_card, style='Card.TFrame')
@@ -1274,6 +1323,65 @@ class CoordinateFinderApp:
             val = int(raw)
         except ValueError:
             return 40000
+        return max(0, val)
+
+    def _nm_get_color_split_override(self, target_color: str = "") -> List[int]:
+        if not self.nm_color_split_entry:
+            return []
+        raw = (self.nm_color_split_entry.get() or "").strip()
+        if not raw:
+            return []
+        target = (target_color or "").strip().lower()
+        parts = [p.strip() for p in raw.replace(";", ",").replace("|", ",").split(",")]
+        out: List[int] = []
+        color_specific = {}
+        for part in parts:
+            if not part:
+                continue
+            if ":" in part or "=" in part:
+                sep = ":" if ":" in part else "="
+                name, vals = part.split(sep, 1)
+                name = name.strip().lower()
+                vals = vals.strip()
+                color_specific[name] = vals
+                continue
+            # allow space-separated too
+            for token in part.split():
+                try:
+                    val = int(token)
+                except Exception:
+                    continue
+                if val > 0:
+                    out.append(val)
+
+        if target and target in color_specific:
+            out = []
+            vals = color_specific[target]
+            for token in vals.replace("|", " ").replace(",", " ").split():
+                try:
+                    val = int(token)
+                except Exception:
+                    continue
+                if val > 0:
+                    out.append(val)
+        # de-dupe preserve order
+        seen = set()
+        cleaned = []
+        for val in out:
+            if val in seen:
+                continue
+            seen.add(val)
+            cleaned.append(val)
+        return cleaned
+
+    def _nm_get_color_min_area(self) -> int:
+        if not self.nm_color_min_area_entry:
+            return 6
+        raw = (self.nm_color_min_area_entry.get() or "").strip()
+        try:
+            val = int(raw)
+        except Exception:
+            return 6
         return max(0, val)
 
     def _nm_parse_rgb_color(self, value: str) -> Optional[Tuple[int, int, int, int]]:
@@ -2076,6 +2184,18 @@ class CoordinateFinderApp:
                 "pink": (138, 170),
                 "brown": (10, 25),
             },
+            "val": {
+                "red1": (40, 240),
+                "red2": (40, 235),
+                "orange": (30, 245),
+                "yellow": (30, 250),
+                "green": (25, 245),
+                "teal": (30, 245),
+                "blue": (30, 245),
+                "purple": (40, 245),
+                "pink": (30, 250),
+                "brown": (0, 140),
+            },
             "sat_val": {
                 "strong_s": 35,
                 "strong_v": 35,
@@ -2115,6 +2235,51 @@ class CoordinateFinderApp:
                 "s_min": 30,
             },
         }
+
+    def _nm_roi_settings_defaults(self) -> Dict[str, float]:
+        return {
+            "overlap_x_pct": 0.08,
+            "overlap_y_pct": 0.08,
+            "top_bar_h_pct": 0.30,
+            "sidebar_w_pct": 0.35,
+            "footer_h_pct": 0.25,
+            "center_w_pct": 0.90,
+            "center_h_pct": 0.90,
+        }
+
+    def _nm_load_roi_settings(self) -> Dict[str, float]:
+        defaults = self._nm_roi_settings_defaults()
+        path = getattr(self, "roi_settings_path", None)
+        if not path or not os.path.exists(path):
+            return dict(defaults)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return dict(defaults)
+        merged = dict(defaults)
+        for key, default_val in defaults.items():
+            try:
+                val = float(data.get(key, default_val))
+            except Exception:
+                val = default_val
+            # Clamp to sane range
+            if val < 0:
+                val = 0.0
+            if val > 1.0:
+                val = 1.0
+            merged[key] = val
+        return merged
+
+    def _nm_save_roi_settings(self) -> None:
+        path = getattr(self, "roi_settings_path", None)
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.nm_roi_settings, f, indent=2)
+        except Exception:
+            pass
 
     def _nm_flat_color_settings(self) -> List[Tuple[str, Any]]:
         s = self.nm_color_settings
@@ -2254,6 +2419,9 @@ class CoordinateFinderApp:
             s["colorful"]["v_min"] = iv("colorful_v_min", 40)
             s["brown"]["v_max"] = iv("brown_v_max", 140)
             s["brown"]["s_min"] = iv("brown_s_min", 30)
+            s.setdefault("val", {})
+            brown_vmin, _ = s["val"].get("brown", (0, 255))
+            s["val"]["brown"] = (int(brown_vmin), int(s["brown"]["v_max"]))
 
             self.log("Color mask settings updated.", "success")
             try:
@@ -2296,7 +2464,7 @@ class CoordinateFinderApp:
 
         header = ttk.Frame(win, style='Card.TFrame', padding=10)
         header.pack(fill=tk.X, padx=10, pady=(10, 6))
-        ttk.Label(header, text="Hue ranges (0–179). Adjust min/max to tighten color masks.",
+        ttk.Label(header, text="Hue ranges (0-179) and brightness (V) ranges (0-255). Adjust min/max to tighten color masks.",
                   style='Header.TLabel').pack(anchor=tk.W)
 
         # Preview area
@@ -2308,26 +2476,52 @@ class CoordinateFinderApp:
         body = ttk.Frame(win, style='Card.TFrame', padding=10)
         body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        # Editable hue ranges
+        # Editable hue + brightness ranges
         self._hue_vars = {}
+        self._hue_brightness_labels = {}
+        header_row = ttk.Frame(body, style='Dark.TFrame')
+        header_row.pack(fill=tk.X, pady=(0, 6))
+        ttk.Label(header_row, text="Color", style='Dark.TLabel', width=10).pack(side=tk.LEFT, padx=(6, 8))
+        ttk.Label(header_row, text="Hue min", style='Dark.TLabel', width=7).pack(side=tk.LEFT)
+        ttk.Label(header_row, text="Hue max", style='Dark.TLabel', width=7).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(header_row, text="V min", style='Dark.TLabel', width=7).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Label(header_row, text="V max", style='Dark.TLabel', width=7).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(header_row, text="V range", style='Dark.TLabel', width=8).pack(side=tk.LEFT, padx=(10, 0))
+
+        val_settings = self.nm_color_settings.get("val", {})
         for name, (hmin, hmax) in self.nm_color_settings["hue"].items():
+            vmin, vmax = val_settings.get(name, (0, 255))
             row = ttk.Frame(body, style='Dark.TFrame')
             row.pack(fill=tk.X, pady=3)
             ttk.Label(row, text=name, style='Dark.TLabel', width=10).pack(side=tk.LEFT, padx=(6, 8))
             min_var = tk.StringVar(value=str(hmin))
             max_var = tk.StringVar(value=str(hmax))
+            vmin_var = tk.StringVar(value=str(vmin))
+            vmax_var = tk.StringVar(value=str(vmax))
             min_entry = tk.Entry(row, textvariable=min_var, width=8, bg='#21262d', fg='#c9d1d9',
                                  insertbackground='#58a6ff', relief=tk.FLAT, highlightthickness=1,
                                  highlightbackground='#30363d', highlightcolor='#58a6ff')
             max_entry = tk.Entry(row, textvariable=max_var, width=8, bg='#21262d', fg='#c9d1d9',
                                  insertbackground='#58a6ff', relief=tk.FLAT, highlightthickness=1,
                                  highlightbackground='#30363d', highlightcolor='#58a6ff')
+            vmin_entry = tk.Entry(row, textvariable=vmin_var, width=8, bg='#21262d', fg='#c9d1d9',
+                                  insertbackground='#58a6ff', relief=tk.FLAT, highlightthickness=1,
+                                  highlightbackground='#30363d', highlightcolor='#58a6ff')
+            vmax_entry = tk.Entry(row, textvariable=vmax_var, width=8, bg='#21262d', fg='#c9d1d9',
+                                  insertbackground='#58a6ff', relief=tk.FLAT, highlightthickness=1,
+                                  highlightbackground='#30363d', highlightcolor='#58a6ff')
             min_entry.pack(side=tk.LEFT, padx=(0, 6))
-            max_entry.pack(side=tk.LEFT, padx=(0, 6))
-            ttk.Label(row, text="min / max", style='Dark.TLabel').pack(side=tk.LEFT, padx=(6, 0))
-            self._hue_vars[name] = (min_var, max_var)
+            max_entry.pack(side=tk.LEFT, padx=(0, 10))
+            vmin_entry.pack(side=tk.LEFT, padx=(0, 6))
+            vmax_entry.pack(side=tk.LEFT, padx=(0, 6))
+            preview = ttk.Label(row)
+            preview.pack(side=tk.LEFT, padx=(6, 0), fill=tk.X, expand=True)
+            self._hue_brightness_labels[name] = preview
+            self._hue_vars[name] = (min_var, max_var, vmin_var, vmax_var)
             min_var.trace_add("write", lambda *args: self._update_hue_editor_preview(apply_live=True))
             max_var.trace_add("write", lambda *args: self._update_hue_editor_preview(apply_live=True))
+            vmin_var.trace_add("write", lambda *args: self._update_hue_editor_preview(apply_live=True))
+            vmax_var.trace_add("write", lambda *args: self._update_hue_editor_preview(apply_live=True))
 
         btn_row = ttk.Frame(win, style='Dark.TFrame')
         btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
@@ -2343,14 +2537,23 @@ class CoordinateFinderApp:
                   relief=tk.FLAT, cursor='hand2', padx=12, pady=6).pack(side=tk.LEFT)
 
         self._update_hue_editor_preview(apply_live=False)
+        self.root.after(50, lambda: self._update_hue_editor_preview(apply_live=False))
 
     def _reset_hue_defaults(self):
-        """Reset only hue ranges to defaults and refresh the editor."""
-        defaults = self._nm_color_settings_defaults()["hue"]
-        self.nm_color_settings["hue"] = dict(defaults)
+        """Reset hue + brightness ranges to defaults and refresh the editor."""
+        defaults = self._nm_color_settings_defaults()
+        self.nm_color_settings["hue"] = dict(defaults["hue"])
+        self.nm_color_settings["val"] = dict(defaults.get("val", {}))
         if hasattr(self, "_hue_vars"):
-            for name, (min_var, max_var) in self._hue_vars.items():
-                hmin, hmax = defaults.get(name, (0, 179))
+            for name, vars_tuple in self._hue_vars.items():
+                hmin, hmax = defaults["hue"].get(name, (0, 179))
+                vmin, vmax = defaults.get("val", {}).get(name, (0, 255))
+                if len(vars_tuple) >= 4:
+                    min_var, max_var, vmin_var, vmax_var = vars_tuple
+                    vmin_var.set(str(vmin))
+                    vmax_var.set(str(vmax))
+                else:
+                    min_var, max_var = vars_tuple
                 min_var.set(str(hmin))
                 max_var.set(str(hmax))
         self._update_hue_editor_preview(apply_live=False)
@@ -2367,15 +2570,47 @@ class CoordinateFinderApp:
                 v = default
             return max(0, min(179, v))
 
+        def clamp_val(value, default):
+            try:
+                v = int(float(value))
+            except Exception:
+                v = default
+            return max(0, min(255, v))
+
         preview_ranges = {}
-        for name, (min_var, max_var) in self._hue_vars.items():
+        preview_vals = {}
+        for name, vars_tuple in self._hue_vars.items():
+            if len(vars_tuple) >= 4:
+                min_var, max_var, vmin_var, vmax_var = vars_tuple
+            else:
+                min_var, max_var = vars_tuple
+                vmin_var = None
+                vmax_var = None
             hmin = clamp_hue(min_var.get().strip(), 0)
             hmax = clamp_hue(max_var.get().strip(), 179)
+            if vmin_var is not None and vmax_var is not None:
+                vmin = clamp_val(vmin_var.get().strip(), 0)
+                vmax = clamp_val(vmax_var.get().strip(), 255)
+            else:
+                vmin, vmax = 0, 255
+            if vmin > vmax:
+                vmin, vmax = vmax, vmin
             preview_ranges[name] = (hmin, hmax)
+            preview_vals[name] = (vmin, vmax)
 
         if apply_live:
             for name, (hmin, hmax) in preview_ranges.items():
                 self.nm_color_settings["hue"][name] = (hmin, hmax)
+            self.nm_color_settings.setdefault("val", {})
+            for name, (vmin, vmax) in preview_vals.items():
+                self.nm_color_settings["val"][name] = (vmin, vmax)
+                if name == "brown":
+                    try:
+                        self.nm_color_settings["brown"]["v_max"] = int(vmax)
+                    except Exception:
+                        pass
+
+        self._update_hue_brightness_previews(preview_ranges, preview_vals)
 
         img = self._render_hue_preview(preview_ranges)
         if img is None:
@@ -2386,6 +2621,103 @@ class CoordinateFinderApp:
             self._hue_preview_label.image = self._hue_preview_img
         except Exception:
             pass
+
+    def _update_hue_brightness_previews(
+        self,
+        preview_ranges: Dict[str, Tuple[int, int]],
+        preview_vals: Dict[str, Tuple[int, int]],
+    ) -> None:
+        """Update per-color brightness range previews next to inputs."""
+        if not hasattr(self, "_hue_brightness_labels"):
+            return
+        try:
+            import colorsys
+        except Exception:
+            colorsys = None
+
+        if not hasattr(self, "_hue_brightness_imgs"):
+            self._hue_brightness_imgs = {}
+
+        for name, label in self._hue_brightness_labels.items():
+            hmin, hmax = preview_ranges.get(name, (0, 179))
+            vmin, vmax = preview_vals.get(name, (0, 255))
+            label_width = 0
+            try:
+                label_width = int(label.winfo_width() or 0)
+            except Exception:
+                label_width = 0
+            if label_width <= 30:
+                label_width = 200
+            img = self._render_brightness_preview(hmin, hmax, vmin, vmax, colorsys, width=label_width)
+            if img is None:
+                continue
+            try:
+                photo = ImageTk.PhotoImage(img)
+                label.configure(image=photo)
+                label.image = photo
+                self._hue_brightness_imgs[name] = photo
+            except Exception:
+                pass
+
+    def _render_brightness_preview(
+        self,
+        hmin: int,
+        hmax: int,
+        vmin: int,
+        vmax: int,
+        colorsys_mod=None,
+        width: int = 200,
+        height: int = 14,
+    ) -> Optional[Image.Image]:
+        """Render a small brightness bar with the allowed V range highlighted."""
+        try:
+            from PIL import ImageDraw
+        except Exception:
+            return None
+
+        img = Image.new("RGBA", (width, height), (0, 0, 0, 255))
+        draw = ImageDraw.Draw(img)
+
+        # Color brightness gradient: black -> dark color -> bright color -> light color -> white
+        if colorsys_mod is None:
+            for x in range(width):
+                v = int(round(255 * x / max(1, width - 1)))
+                draw.line([(x, 0), (x, height)], fill=(v, v, v, 255))
+        else:
+            mid = (hmin + hmax) / 2.0
+            hue = mid / 179.0
+            pivot = int(round((width - 1) * 0.8))
+            pivot = max(1, min(width - 2, pivot))
+            for x in range(width):
+                if x <= pivot:
+                    v = x / float(pivot)
+                    s = 1.0
+                else:
+                    v = 1.0
+                    s = 1.0 - ((x - pivot) / float((width - 1) - pivot))
+                r, g, b = colorsys_mod.hsv_to_rgb(hue, s, v)
+                draw.line([(x, 0), (x, height)], fill=(int(r * 255), int(g * 255), int(b * 255), 255))
+
+        # Highlight allowed V range
+        vmin = max(0, min(255, int(vmin)))
+        vmax = max(0, min(255, int(vmax)))
+        if vmin > vmax:
+            vmin, vmax = vmax, vmin
+        x0 = int(round(vmin / 255.0 * (width - 1)))
+        x1 = int(round(vmax / 255.0 * (width - 1)))
+        if x1 < x0:
+            x0, x1 = x1, x0
+        if x1 == x0:
+            x1 = min(width - 1, x0 + 1)
+
+        # Dim outside the allowed V range and outline the active region
+        if x0 > 0:
+            draw.rectangle([0, 0, x0, height - 1], fill=(0, 0, 0, 90))
+        if x1 < width - 1:
+            draw.rectangle([x1, 0, width - 1, height - 1], fill=(0, 0, 0, 90))
+        # No border; just dim outside the allowed range.
+
+        return img.convert("RGB")
 
     def _render_hue_preview(self, ranges: Dict[str, Tuple[int, int]]) -> Optional[Image.Image]:
         """Render a hue gradient with ranges overlaid."""
@@ -2430,6 +2762,155 @@ class CoordinateFinderApp:
             draw.text((x0 + 2, text_y), f"{name} {hmin}-{hmax}", fill=color, font=font)
 
         return img
+
+    def open_roi_editor(self):
+        """Popup to visualize and edit ROI settings."""
+        try:
+            if hasattr(self, "_roi_editor_win") and self._roi_editor_win.winfo_exists():
+                self._roi_editor_win.lift()
+                return
+        except Exception:
+            pass
+
+        win = tk.Toplevel(self.root)
+        self._roi_editor_win = win
+        win.title("ROI Editor")
+        win.geometry("720x680")
+        win.configure(bg="#0d1117")
+
+        header = ttk.Frame(win, style='Card.TFrame', padding=10)
+        header.pack(fill=tk.X, padx=10, pady=(10, 6))
+        ttk.Label(header, text="ROI settings (percent of window). Use Prev/Next to preview each ROI.",
+                  style='Header.TLabel').pack(anchor=tk.W)
+
+        preview_frame = ttk.Frame(win, style='Card.TFrame', padding=10)
+        preview_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        self._roi_preview_label = ttk.Label(preview_frame)
+        self._roi_preview_label.pack(fill=tk.X)
+        self._roi_preview_info = ttk.Label(preview_frame, style='Dark.TLabel')
+        self._roi_preview_info.pack(anchor=tk.W, pady=(6, 0))
+
+        nav = ttk.Frame(win, style='Dark.TFrame')
+        nav.pack(fill=tk.X, padx=10, pady=(0, 8))
+        self._roi_zones = ["any", "top_bar", "sidebar", "footer", "center"]
+        self._roi_preview_index = 0
+        self._roi_zone_label = ttk.Label(nav, text="ROI: any", style='Dark.TLabel')
+        self._roi_zone_label.pack(side=tk.LEFT)
+        btn_prev = tk.Button(nav, text="◀ Prev", command=lambda: self._roi_preview_step(-1),
+                             bg='#30363d', fg='#c9d1d9', relief=tk.FLAT, cursor='hand2', padx=10, pady=4)
+        btn_prev.pack(side=tk.RIGHT, padx=(6, 0))
+        btn_next = tk.Button(nav, text="Next ▶", command=lambda: self._roi_preview_step(1),
+                             bg='#30363d', fg='#c9d1d9', relief=tk.FLAT, cursor='hand2', padx=10, pady=4)
+        btn_next.pack(side=tk.RIGHT)
+
+        body = ttk.Frame(win, style='Card.TFrame', padding=10)
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+
+        self._roi_vars = {}
+        fields = [
+            ("overlap_x_pct", "Overlap X (%)"),
+            ("overlap_y_pct", "Overlap Y (%)"),
+            ("top_bar_h_pct", "Top bar height (%)"),
+            ("sidebar_w_pct", "Sidebar width (%)"),
+            ("footer_h_pct", "Footer height (%)"),
+            ("center_w_pct", "Center width (%)"),
+            ("center_h_pct", "Center height (%)"),
+        ]
+        for key, label in fields:
+            row = ttk.Frame(body, style='Dark.TFrame')
+            row.pack(fill=tk.X, pady=3)
+            ttk.Label(row, text=label, style='Dark.TLabel', width=22).pack(side=tk.LEFT, padx=(6, 8))
+            var = tk.StringVar(value=str(int(round(self.nm_roi_settings.get(key, 0.0) * 100))))
+            entry = tk.Entry(row, textvariable=var, width=8, bg='#21262d', fg='#c9d1d9',
+                             insertbackground='#58a6ff', relief=tk.FLAT, highlightthickness=1,
+                             highlightbackground='#30363d', highlightcolor='#58a6ff')
+            entry.pack(side=tk.LEFT, padx=(0, 6))
+            self._roi_vars[key] = var
+            var.trace_add("write", lambda *args: self._update_roi_editor_preview(apply_live=True))
+
+        btn_row = ttk.Frame(win, style='Dark.TFrame')
+        btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
+        tk.Button(btn_row, text="Apply", command=lambda: self._update_roi_editor_preview(apply_live=True),
+                  bg='#238636', fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief=tk.FLAT, cursor='hand2', padx=12, pady=6).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btn_row, text="Save", command=self._save_roi_editor_settings,
+                  bg='#1f6feb', fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief=tk.FLAT, cursor='hand2', padx=12, pady=6).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btn_row, text="Reset Defaults", command=self._reset_roi_defaults,
+                  bg='#444c56', fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief=tk.FLAT, cursor='hand2', padx=12, pady=6).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Button(btn_row, text="Close", command=win.destroy,
+                  bg='#30363d', fg='white', font=('Segoe UI', 10, 'bold'),
+                  relief=tk.FLAT, cursor='hand2', padx=12, pady=6).pack(side=tk.LEFT)
+
+        self._update_roi_editor_preview(apply_live=False)
+
+    def _roi_preview_step(self, delta: int) -> None:
+        if not hasattr(self, "_roi_zones"):
+            return
+        self._roi_preview_index = (self._roi_preview_index + delta) % len(self._roi_zones)
+        self._update_roi_editor_preview(apply_live=False)
+
+    def _reset_roi_defaults(self) -> None:
+        defaults = self._nm_roi_settings_defaults()
+        self.nm_roi_settings = dict(defaults)
+        if hasattr(self, "_roi_vars"):
+            for key, var in self._roi_vars.items():
+                var.set(str(int(round(defaults.get(key, 0.0) * 100))))
+        self._update_roi_editor_preview(apply_live=False)
+
+    def _save_roi_editor_settings(self) -> None:
+        self._update_roi_editor_preview(apply_live=True)
+        self._nm_save_roi_settings()
+        self.log("ROI settings saved.", "success")
+
+    def _update_roi_editor_preview(self, apply_live: bool = True) -> None:
+        if not hasattr(self, "_roi_vars"):
+            return
+
+        def read_pct(key: str, default: float) -> float:
+            try:
+                val = float(self._roi_vars[key].get().strip())
+            except Exception:
+                val = default * 100.0
+            val = max(0.0, min(100.0, val))
+            return val / 100.0
+
+        if apply_live:
+            defaults = self._nm_roi_settings_defaults()
+            for key, default in defaults.items():
+                self.nm_roi_settings[key] = read_pct(key, default)
+
+        zone = "any"
+        if hasattr(self, "_roi_zones"):
+            zone = self._roi_zones[self._roi_preview_index]
+        if hasattr(self, "_roi_zone_label"):
+            self._roi_zone_label.config(text=f"ROI: {zone}")
+
+        if not self.original_image:
+            return
+        img = self.original_image.copy()
+        roi = self._nm_zone_to_roi(img, (0, 0, img.width, img.height), zone)
+        overlay = self._nm_draw_roi_overlay(img, roi)
+
+        # Scale preview to fit
+        max_w = 660
+        scale = min(1.0, max_w / overlay.width)
+        if scale < 1.0:
+            new_size = (int(overlay.width * scale), int(overlay.height * scale))
+            overlay = overlay.resize(new_size, Image.Resampling.LANCZOS)
+
+        try:
+            self._roi_preview_img = ImageTk.PhotoImage(overlay)
+            self._roi_preview_label.configure(image=self._roi_preview_img)
+            self._roi_preview_label.image = self._roi_preview_img
+        except Exception:
+            pass
+
+        if hasattr(self, "_roi_preview_info"):
+            self._roi_preview_info.config(
+                text=f"ROI coords: ({roi.left}, {roi.top})–({roi.right}, {roi.bottom})"
+            )
 
     def _on_mask_settings_change(self):
         """Debounced live update for mask settings."""
@@ -2487,6 +2968,9 @@ class CoordinateFinderApp:
             s["colorful"]["v_min"] = iv("colorful_v_min", 40)
             s["brown"]["v_max"] = iv("brown_v_max", 140)
             s["brown"]["s_min"] = iv("brown_s_min", 30)
+            s.setdefault("val", {})
+            brown_vmin, _ = s["val"].get("brown", (0, 255))
+            s["val"]["brown"] = (int(brown_vmin), int(s["brown"]["v_max"]))
             self.run_color_mask_debug()
         except Exception:
             pass
@@ -4876,6 +5360,7 @@ Rules:
 - You are locating WHAT to click to achieve the user's goal. If clicking text inside the target is the fastest path, set text_intent accordingly.
 - Example: if the goal is "search bar", you can target the visible placeholder/label text inside the search input.
 - Example: to close a tab, the clickable target may be a small "X" icon; text_intent can be "x".
+- If the target is a logo/icon/symbol or there is no visible text, set text_intent.primary_text="" and text_intent.variants=[].
 
 You are given:
 - A UI screenshot (as an image)
@@ -5111,12 +5596,14 @@ Schema:
         width = right - left
         height = bottom - top
 
+        settings = self.nm_roi_settings if isinstance(getattr(self, "nm_roi_settings", None), dict) else self._nm_roi_settings_defaults()
+
         # Default: full window
         if zone not in {"top_bar", "sidebar", "footer", "center"}:
             return ScreenRegion(left=left, top=top, width=width, height=height)
 
-        overlap_x = int(width * 0.08)
-        overlap_y = int(height * 0.08)
+        overlap_x = int(width * settings.get("overlap_x_pct", 0.08))
+        overlap_y = int(height * settings.get("overlap_y_pct", 0.08))
 
         def clamp_rect(l: int, t: int, r: int, b: int) -> ScreenRegion:
             l2 = max(left, l - overlap_x)
@@ -5127,18 +5614,18 @@ Schema:
 
         if zone == "top_bar":
             # Wider top bar to avoid missing edge items
-            h = int(height * 0.30)
+            h = int(height * settings.get("top_bar_h_pct", 0.30))
             return clamp_rect(left, top, right, top + h)
         if zone == "sidebar":
-            w = int(width * 0.35)
+            w = int(width * settings.get("sidebar_w_pct", 0.35))
             return clamp_rect(left, top, left + w, bottom)
         if zone == "footer":
-            h = int(height * 0.25)
+            h = int(height * settings.get("footer_h_pct", 0.25))
             return clamp_rect(left, bottom - h, right, bottom)
         if zone == "center":
             # Much wider center region to include edges
-            w = int(width * 0.90)
-            h = int(height * 0.90)
+            w = int(width * settings.get("center_w_pct", 0.90))
+            h = int(height * settings.get("center_h_pct", 0.90))
             cx = left + width // 2
             cy = top + height // 2
             l = cx - w // 2
@@ -6197,20 +6684,128 @@ Schema:
             self.log("OpenCV (cv2) is not available; color-region detection is disabled.", "error")
             return ([], []) if return_masks else []
 
+        # Prefer user-selected splits when provided; otherwise choose best-looking ones.
+        masks_for_regions = masks_u8
+        selected_indices: List[int] = list(range(1, len(masks_u8) + 1))
+        split_override = self._nm_get_color_split_override(target_color)
+        use_direct_bbox = False
+        if split_override:
+            chosen = []
+            chosen_idx = []
+            for idx in split_override:
+                if 1 <= idx <= len(masks_u8):
+                    chosen.append(masks_u8[idx - 1])
+                    chosen_idx.append(idx)
+            if chosen:
+                masks_for_regions = chosen
+                selected_indices = chosen_idx
+                use_direct_bbox = True
+                self.log(
+                    f"Color mask using split override for '{target_color}': {selected_indices} of {len(masks_u8)}.",
+                    "info",
+                )
+        elif len(masks_u8) > 1:
+            # Use all splits by default so every masked area can become a candidate.
+            masks_for_regions = list(masks_u8)
+            selected_indices = list(range(1, len(masks_u8) + 1))
+
         regions: List[Tuple[int, int, int, int]] = []
         roi_area = max(1, (roi.right - roi.left) * (roi.bottom - roi.top))
-        min_area = max(25, int(roi_area * 0.00005))
+        min_area = max(self._nm_get_color_min_area(), int(roi_area * 0.00005))
+
+        # Combine masks for later ratio checks and brightness filtering
+        combined_mask = np.zeros_like(masks_for_regions[0], dtype=np.uint8)
+        for m in masks_for_regions:
+            if m is not None:
+                combined_mask = np.maximum(combined_mask, m)
+
+        def _apply_brightness_filter(
+            regs: List[Tuple[int, int, int, int]],
+        ) -> List[Tuple[int, int, int, int]]:
+            color_key = self._nm_normalize_color(target_color)
+            if color_key in {"", "unknown", "colorful"}:
+                return regs
+            try:
+                v_settings = self.nm_color_settings.get("val", {})
+
+                def _v_limits(name: str):
+                    vmin, vmax = v_settings.get(name, (0, 255))
+                    try:
+                        vmin = int(float(vmin))
+                        vmax = int(float(vmax))
+                    except Exception:
+                        vmin, vmax = (0, 255)
+                    vmin = max(0, min(255, vmin))
+                    vmax = max(0, min(255, vmax))
+                    if vmin > vmax:
+                        vmin, vmax = vmax, vmin
+                    full = (vmin <= 0) and (vmax >= 255)
+                    return vmin, vmax, full
+
+                if color_key == "red":
+                    vmin1, vmax1, full1 = _v_limits("red1")
+                    vmin2, vmax2, full2 = _v_limits("red2")
+                    if full1 and full2:
+                        return regs
+                else:
+                    vmin, vmax, full = _v_limits(color_key)
+                    if full:
+                        return regs
+
+                roi_img = image.crop((roi.left, roi.top, roi.right, roi.bottom)).convert("RGB")
+                roi_arr = np.array(roi_img)
+                hsv = cv2.cvtColor(roi_arr, cv2.COLOR_RGB2HSV)
+                v = hsv[:, :, 2]
+                if color_key == "red":
+                    v_allow = ((v >= vmin1) & (v <= vmax1)) | ((v >= vmin2) & (v <= vmax2))
+                else:
+                    v_allow = (v >= vmin) & (v <= vmax)
+
+                filtered: List[Tuple[int, int, int, int]] = []
+                for l, t, r, b in regs:
+                    rl = max(0, l - roi.left)
+                    rt = max(0, t - roi.top)
+                    rr = min(roi.right - roi.left, r - roi.left)
+                    rb = min(roi.bottom - roi.top, b - roi.top)
+                    if rr <= rl or rb <= rt:
+                        continue
+                    sub_mask = combined_mask[rt:rb, rl:rr]
+                    if sub_mask.size == 0:
+                        continue
+                    sub_v = v_allow[rt:rb, rl:rr]
+                    if np.any((sub_mask > 0) & sub_v):
+                        filtered.append((l, t, r, b))
+                return filtered
+            except Exception:
+                return regs
+        if use_direct_bbox:
+            for mask_u8 in masks_for_regions:
+                if mask_u8 is None:
+                    continue
+                work = mask_u8.copy()
+                contours, _ = cv2.findContours(work, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                for cnt in contours:
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    area = w * h
+                    if area < min_area:
+                        continue
+                    if max_area > 0 and area > max_area:
+                        continue
+                    if w < 4 or h < 4:
+                        continue
+                    pad_out = 2
+                    l = max(0, x - pad_out)
+                    t = max(0, y - pad_out)
+                    r = min(roi.right - roi.left, x + w + pad_out)
+                    b = min(roi.bottom - roi.top, y + h + pad_out)
+                    regions.append((roi.left + l, roi.top + t, roi.left + r, roi.top + b))
+            regions = _apply_brightness_filter(regions)
+            return (regions, masks_u8) if return_masks else regions
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         dilate_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
 
-        # Combine masks for later ratio checks
-        combined_mask = np.zeros_like(masks_u8[0], dtype=np.uint8)
-        for m in masks_u8:
-            if m is not None:
-                combined_mask = np.maximum(combined_mask, m)
-
-        for mask_u8 in masks_u8:
+        for mask_u8 in masks_for_regions:
             if mask_u8 is None:
                 continue
             work = mask_u8.copy()
@@ -6325,6 +6920,45 @@ Schema:
 
         regions = merge_close(regions, gap=3)
 
+        # Ensure any remaining masked components become regions (so visible masks yield candidates).
+        try:
+            comp_mask = (combined_mask > 0).astype(np.uint8)
+            num, labels, stats, _ = cv2.connectedComponentsWithStats(comp_mask, connectivity=8)
+            if num > 1:
+                region_mask = np.zeros_like(comp_mask, dtype=np.uint8)
+                for l, t, r, b in regions:
+                    rl = max(0, l - roi.left)
+                    rt = max(0, t - roi.top)
+                    rr = min(roi.right - roi.left, r - roi.left)
+                    rb = min(roi.bottom - roi.top, b - roi.top)
+                    if rr > rl and rb > rt:
+                        region_mask[rt:rb, rl:rr] = 1
+
+                extras: List[Tuple[int, int, int, int]] = []
+                for label in range(1, num):
+                    x = int(stats[label, cv2.CC_STAT_LEFT])
+                    y = int(stats[label, cv2.CC_STAT_TOP])
+                    w = int(stats[label, cv2.CC_STAT_WIDTH])
+                    h = int(stats[label, cv2.CC_STAT_HEIGHT])
+                    area = max(1, w * h)
+                    if area < min_area:
+                        continue
+                    if max_area > 0 and area > max_area:
+                        continue
+                    if w < 2 or h < 2:
+                        continue
+                    sub = region_mask[y:y + h, x:x + w]
+                    if sub.size > 0 and np.any(sub):
+                        continue
+                    extras.append((roi.left + x, roi.top + y, roi.left + x + w, roi.top + y + h))
+
+                if extras:
+                    regions.extend(extras)
+                    regions = merge_close(regions, gap=3)
+        except Exception:
+            pass
+
+        regions = _apply_brightness_filter(regions)
         return (regions, masks_u8) if return_masks else regions
 
     def _nm_find_border_color_regions(
@@ -6396,6 +7030,86 @@ Schema:
             regions.append((roi.left + x, roi.top + y, roi.left + x + w, roi.top + y + h))
 
         return regions
+
+    def _nm_select_best_color_masks(
+        self,
+        image: Image.Image,
+        roi: ScreenRegion,
+        masks_u8: List["np.ndarray"],
+        keep: int = 2,
+    ) -> Tuple[List["np.ndarray"], List[int]]:
+        """Pick the most button-like mask splits to avoid merged blobs."""
+        if not masks_u8:
+            return [], []
+        if len(masks_u8) <= 1:
+            return masks_u8, [1]
+
+        try:
+            import cv2
+            import numpy as np
+        except Exception:
+            return masks_u8, list(range(1, len(masks_u8) + 1))
+
+        roi_img = image.crop((roi.left, roi.top, roi.right, roi.bottom)).convert("RGB")
+        roi_arr = np.array(roi_img)
+        gray = cv2.cvtColor(roi_arr, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 50, 150)
+
+        roi_area = max(1, (roi.right - roi.left) * (roi.bottom - roi.top))
+        min_pixels = max(80, int(roi_area * 0.0002))
+        scored = []
+
+        for idx, mask_u8 in enumerate(masks_u8, start=1):
+            if mask_u8 is None:
+                continue
+            area = int(np.count_nonzero(mask_u8))
+            if area < min_pixels:
+                continue
+
+            contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if not contours:
+                continue
+            cnt = max(contours, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(cnt)
+            bbox_area = max(1, w * h)
+            fill = float(area) / float(bbox_area)
+
+            aspect = w / max(1.0, h)
+            if aspect < 0.5 or aspect > 12.0:
+                shape_score = 0.2
+            elif aspect < 0.8 or aspect > 8.0:
+                shape_score = 0.6
+            else:
+                shape_score = 1.0
+
+            area_ratio = float(area) / float(mask_u8.size)
+            size_score = max(0.0, 1.0 - min(area_ratio / 0.25, 1.0))
+
+            # Border edge density (hard edges boost score)
+            border = np.zeros((h, w), dtype=np.uint8)
+            border[:2, :] = 1
+            border[-2:, :] = 1
+            border[:, :2] = 1
+            border[:, -2:] = 1
+            border_edges = edges[y:y + h, x:x + w]
+            border_count = int(np.count_nonzero(border))
+            if border_count:
+                border_ratio = float(np.count_nonzero(border_edges[border == 1])) / float(border_count)
+            else:
+                border_ratio = 0.0
+
+            score = (fill * 1.3) + (shape_score * 0.9) + (border_ratio * 0.8) + (size_score * 0.5)
+            scored.append((score, idx, mask_u8))
+
+        if not scored:
+            return masks_u8, list(range(1, len(masks_u8) + 1))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        keep_n = max(1, min(int(keep), len(scored)))
+        chosen = scored[:keep_n]
+        selected_masks = [m for _, _, m in chosen]
+        selected_indices = [idx for _, idx, _ in chosen]
+        return selected_masks, selected_indices
 
     def _nm_build_color_masks(
         self,
@@ -6541,7 +7255,6 @@ Schema:
                     strong = mask & (s >= settings["sat_val"]["strong_s"]) & (v >= settings["sat_val"]["strong_v"])
                     soft = mask & (s >= settings["sat_val"]["soft_s"]) & (v >= settings["sat_val"]["soft_v"])
                     mask = strong | soft
-
         if mask is None and masks is None:
             return []
 
@@ -6558,7 +7271,8 @@ Schema:
                 area_ratio = float(np.count_nonzero(mask)) / float(mask.size)
             except Exception:
                 area_ratio = 0.0
-            if area_ratio >= 0.08:
+            split_threshold = 0.08 if color == "blue" else 0.03
+            if area_ratio >= split_threshold:
                 base_mask = mask
                 splits = self._nm_split_mask_by_hsv(roi_array, base_mask, max_clusters=3)
                 if splits:
@@ -6706,6 +7420,30 @@ Schema:
             if area >= min_pixels and area <= base_area * max_ratio:
                 return strong
         return None
+
+    def _nm_mask_to_bbox(
+        self,
+        mask_u8: "np.ndarray",
+        roi: ScreenRegion,
+        pad: int = 2,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """Return a single tight bbox around a mask."""
+        try:
+            import numpy as np
+        except Exception:
+            return None
+        ys, xs = np.where(mask_u8 > 0)
+        if ys.size == 0 or xs.size == 0:
+            return None
+        l = int(xs.min())
+        r = int(xs.max())
+        t = int(ys.min())
+        b = int(ys.max())
+        l = max(0, l - pad)
+        t = max(0, t - pad)
+        r = min((roi.right - roi.left) - 1, r + pad)
+        b = min((roi.bottom - roi.top) - 1, b + pad)
+        return (roi.left + l, roi.top + t, roi.left + r, roi.top + b)
 
     def _nm_run_paddleocr_roi(
         self,
