@@ -17,7 +17,7 @@ from .actions import (
     AgentAction,
     parse_action_from_dict,
     OCRClickAction,
-    SmartClickAction,
+    CoordinateClickAction,
     ChainAction,
     ChainedStep,
 )
@@ -80,10 +80,10 @@ The user's system may be in a different language (Swedish, German, etc). UI elem
 
 ## IMPORTANT: Windows Search - Use Specific App Names
 When searching in Windows Start menu or search bars, ALWAYS use the SPECIFIC app name, NOT generic terms:
-- ✅ GOOD: "Edge", "Chrome", "Firefox", "Calculator", "Notepad", "Excel", "Word"
-- ❌ BAD: "webbläsare" (browser), "kalkylator" (calculator), "textredigerare" (text editor)
-- ✅ GOOD: "Microsoft Edge", "Google Chrome", "Spotify", "Discord"
-- ❌ BAD: "web browser", "music app", "chat app"
+- ? GOOD: "Edge", "Chrome", "Firefox", "Calculator", "Notepad", "Excel", "Word"
+- ? BAD: "webbl?sare" (browser), "kalkylator" (calculator), "textredigerare" (text editor)
+- ? GOOD: "Microsoft Edge", "Google Chrome", "Spotify", "Discord"
+- ? BAD: "web browser", "music app", "chat app"
 
 Windows search works best with actual application names. Look at the screenshot to see what apps are installed and use their exact names.
 
@@ -91,7 +91,7 @@ Windows search works best with actual application names. Look at the screenshot 
 1. Press keys and keyboard shortcuts (keypress, hotkey)
 2. Type text (type)
 3. Chain multiple actions together (chain) - EFFICIENT for sequences
-4. **Smart click** (smart_click) - AI vision identifies and clicks elements - USE THIS FOR BUTTONS
+4. **Coordinate click** (coordinate_click) - ALWAYS use the coordinate finder pipeline to click UI elements
 5. Click at specific coordinates (mouse_click) - only when you know exact coords
 6. Scroll the screen (scroll)
 7. Wait for conditions (wait)
@@ -99,8 +99,8 @@ Windows search works best with actual application names. Look at the screenshot 
 ## Priority Order (ALWAYS follow this)
 1. **Keyboard shortcuts** - Win key, Ctrl+O, Alt+F4, etc. FASTEST
 2. **Chain actions** - Combine related actions (open menu + type + enter)
-3. **Smart click** - FOR ALL BUTTON CLICKS - AI vision finds the right button
-4. **Mouse click** - Only if you can see exact coordinates from the screenshot
+3. **Coordinate click** - THE ONLY method for clicking any UI element
+4. **Mouse click** - Only if you can read exact coordinates from the screenshot (rare)
 
 ## OCR Click Rules (IMPORTANT)
 - Use ocr_click ONLY when the target is visible text on the screen.
@@ -109,57 +109,32 @@ Windows search works best with actual application names. Look at the screenshot 
 
 ## Action Types
 
-### smart_click - AI VISION CLICK (USE FOR ALL BUTTONS, LINKS, UI ELEMENTS!)
-**This is the PRIMARY method for clicking ANY UI element** - buttons, links, search bars, icons, files, etc.
-Uses AI vision with numbered overlays to find and click the correct element. The AI will:
-1. First attempt: Overlay numbers on screen, analyze, and CLICK if confident (>0.8 confidence)
-2. If not confident: ZOOM into a number for refinement, then click
+### coordinate_click - Vision click via the coordinate finder pipeline (REQUIRED for every UI click)
+Use this action whenever you want to click a visible UI element (buttons, links, icons, thumbnails, dialogs, menu entries, etc.).
+The agent runs the same coordinate finder pipeline as coordinate_finder_test.py to locate the most precise click point.
+Be extremely descriptive in `target`, referencing neighboring icons/text/buttons and the position (top/center/left, etc.). Describe colors, labels, and positional cues so the coordinate pipeline can resolve the exact button.
+- `prefer_primary`: true for the main/affirmative action (Accept, OK, Confirm); false only if you explicitly need a secondary option.
+- `button`: "left" by default, "right" for context menus, "middle" rarely.
+- `clicks`: 2 for double-clicking files/folders, 1 for everything else.
+- `description`: short human-readable summary of the action (agent output log will show this).
 
-**IMPORTANT: smart_click supports different click types:**
-- **Single click** (default): `"clicks": 1` - for buttons, links, search bars
-- **Double click**: `"clicks": 2` - for opening files, folders, desktop icons
-- **Right click**: `"button": "right"` - for context menus (save image, copy, paste, etc.)
+Example:
+{"action_type": "coordinate_click", "target": "The blue 'Accept All cookies' button at the bottom-right of the dialog", "prefer_primary": true, "description": "Accept cookies"}
 
-**When to use smart_click:**
-- ✅ Clicking ANY button (Accept, OK, Cancel, Submit, Close, etc.)
-- ✅ Clicking links or navigation elements
-- ✅ Clicking search bars, input fields, text boxes
-- ✅ Clicking icons, menu items, tabs
-- ✅ **Double-clicking files/folders to open them** (use clicks=2)
-- ✅ **Right-clicking for context menus** (use button="right")
-- ✅ Clicking any clickable UI element you can see in the screenshot
+Examples of other coordinate clicks:
+- Cookie popup: {"action_type": "coordinate_click", "target": "Primary 'Accept All' button in the cookie dialog (bottom-right, blue)", "prefer_primary": true, "description": "Accept cookies"}
+- Search bar: {"action_type": "coordinate_click", "target": "YouTube search bar at the top-center of the page, just below the navigation tabs", "description": "Focus the search field"}
+- Close dialog: {"action_type": "coordinate_click", "target": "Small 'X' close button in the top-right corner of the popup", "description": "Close the dialog"}
+- Submit form: {"action_type": "coordinate_click", "target": "The primary 'Submit' button with green text on the lower right", "prefer_primary": true, "description": "Submit the form"}
+- Double-click file: {"action_type": "coordinate_click", "target": "Chrome icon on the desktop (double-click anywhere on the icon)", "clicks": 2, "description": "Launch Chrome"}
+- Right-click: {"action_type": "coordinate_click", "target": "The ribbon area labeled 'File' (for the context menu)", "button": "right", "description": "Open context menu"}
 
-**When NOT to use smart_click:**
-- ❌ Don't use for keyboard shortcuts (use hotkey/keypress instead)
-- ❌ Don't use if you need to type text (use type action instead)
-
-{"action_type": "smart_click", "target": "Accept All cookies button", "prefer_primary": true, "description": "Click the main accept button"}
-
-Examples:
-- Cookie popup: {"action_type": "smart_click", "target": "Accept All cookies button - the primary/main accept button", "prefer_primary": true, "description": "Accept cookies"}
-- Search bar: {"action_type": "smart_click", "target": "YouTube search bar at the top of the page", "description": "Click search bar to focus"}
-- Close dialog: {"action_type": "smart_click", "target": "X close button in top right corner", "description": "Close the dialog"}
-- Submit form: {"action_type": "smart_click", "target": "Submit button", "prefer_primary": true, "description": "Submit the form"}
-- YouTube video thumbnail: {"action_type": "smart_click", "target": "First cat video thumbnail - anywhere on the thumbnail image", "description": "Open the video"}
-- **Open file (double-click)**: {"action_type": "smart_click", "target": "document.pdf file icon", "clicks": 2, "description": "Double-click to open the file"}
-- **Open folder (double-click)**: {"action_type": "smart_click", "target": "Documents folder icon", "clicks": 2, "description": "Double-click to open folder"}
-- **Save image (right-click)**: {"action_type": "smart_click", "target": "The cat image I want to save", "button": "right", "description": "Right-click to open context menu"}
-- **Desktop icon (double-click)**: {"action_type": "smart_click", "target": "Chrome icon on desktop", "clicks": 2, "description": "Double-click to launch Chrome"}
-
-IMPORTANT for smart_click:
-- Be SPECIFIC and DESCRIPTIVE about what to click:
-  - ✅ GOOD: "the blue Accept All cookies button at the bottom"
-  - ✅ GOOD: "YouTube search bar at the top center of the page"
-  - ✅ GOOD: "First cat video thumbnail - anywhere on the thumbnail image"
-  - ✅ GOOD: "Video thumbnail showing [description] - click anywhere on the thumbnail"
-  - ❌ BAD: "accept" (too vague)
-  - ❌ BAD: "search bar" (which one?)
-  - ❌ BAD: "button" (which button?)
-  - ❌ BAD: "video" (which video? be specific!)
-- For VIDEO THUMBNAILS: Say "anywhere on the thumbnail" - the entire thumbnail is clickable, not just a play button
-- Use prefer_primary=true for main actions (Accept, OK, Submit, Confirm, Play)
-- Mention visual cues: color, size, position, text labels when helpful
-- Include context: "at the top", "in the center", "on the left", "the first one", etc.
+IMPORTANT for coordinate_click:
+- Be SPECIFIC and DESCRIPTIVE about what to click and how it sits among other UI elements.
+- Mention relative position ("top-right", "left of the address bar", "below the header text") and colors/labels when helpful.
+- Use `prefer_primary=true` when clicking affirmation/primary actions such as Accept, Confirm, Save, Next.
+- If the UI element appears multiple times, describe exactly which one you need (e.g., "the first one", "the one with the green border").
+- NEVER emit any other click action for UI buttons; coordinate_click is the only allowed click output for those cases.
 
 ### chain - PREFERRED for keyboard sequences
 Chain multiple actions with delays:
@@ -176,18 +151,18 @@ Chain multiple actions with delays:
 ```
 
 **IMPORTANT: Use specific app names in Windows search:**
-- ✅ "Edge" or "Microsoft Edge" (NOT "webbläsare" or "browser")
-- ✅ "Chrome" or "Google Chrome" (NOT "webbläsare")
-- ✅ "Calculator" (NOT "kalkylator" or "calculator app")
-- ✅ "Spotify", "Discord", "Excel", "Word" (use actual app names)
+- ? "Edge" or "Microsoft Edge" (NOT "webbl?sare" or "browser")
+- ? "Chrome" or "Google Chrome" (NOT "webbl?sare")
+- ? "Calculator" (NOT "kalkylator" or "calculator app")
+- ? "Spotify", "Discord", "Excel", "Word" (use actual app names)
 ```
 
-For smart_click in chains, provide the target description in the "text" field (or "target" field):
+For coordinate clicks inside chains, provide the target description in the `text` or `target` field:
 ```json
 {
   "action_type": "chain",
   "steps": [
-    {"action_type": "smart_click", "text": "YouTube search bar", "delay_after": 0.3},
+    {"action_type": "coordinate_click", "text": "YouTube search bar at the top", "delay_after": 0.3},
     {"action_type": "type", "text": "cat video", "delay_after": 0.5},
     {"action_type": "keypress", "keys": ["enter"], "delay_after": 0.3}
   ],
@@ -197,8 +172,8 @@ For smart_click in chains, provide the target description in the "text" field (o
 
 IMPORTANT for chain:
 - Use for keyboard sequences (hotkey, type, keypress)
-- Can include smart_click, ocr_click, wait, click actions too
-- For smart_click: provide target description in "text" OR "target" field (e.g., "text": "the YouTube search bar at the top of the page")
+- Can include coordinate_click, ocr_click, wait, click actions too
+- Provide detailed `text`/`target` when using coordinate_click steps
 - Be SPECIFIC: "YouTube search bar" is better than "search bar", "the blue Accept All button" is better than "accept"
 - For click/mouse_click: provide x and y coordinates
 - Each step has a delay_after (seconds) for UI to respond
@@ -215,7 +190,7 @@ IMPORTANT for chain:
 
 IMPORTANT for type:
 - When typing in Windows Start menu search: Use SPECIFIC app names (e.g., "Edge", "Chrome", "Calculator", "Spotify")
-- DO NOT use generic terms like "webbläsare" (browser), "kalkylator" (calculator) - use the actual app name!
+- DO NOT use generic terms like "webbl?sare" (browser), "kalkylator" (calculator) - use the actual app name!
 - When typing in web search bars: Use the search query (e.g., "cat video", "how to bake a cake")
 - When typing URLs: Use full URL (e.g., "www.youtube.com", "https://google.com")
 - Windows search works best with actual application names - look at the screenshot to see installed apps
@@ -251,17 +226,18 @@ Opening apps:
 - Use chain: Win key -> type app name -> Enter
 
 Clicking buttons (cookie popups, dialogs, forms):
-- Use smart_click with specific description
-- Set prefer_primary=true for main action buttons
+- Use coordinate_click with specific description
+- Set prefer_primary=true for main actions (Accept, OK, Submit, Confirm, Play)
 
 File operations:
 - Ctrl+O to open, Ctrl+S to save, Ctrl+N for new
 
 ## Be Precise
 - Look carefully at the screenshot before acting
-- For buttons, use smart_click with detailed description
+- For buttons, use coordinate_click with detailed description
 - If there are multiple similar buttons, describe the one you want (color, position, text)
-- If something failed, try an alternative approach"""
+- If something failed, try an alternative approach
+"""
 
 
 class PlannerLLM:
@@ -348,7 +324,7 @@ IMPORTANT:
                 return True
         return False
 
-    def _ocr_to_smart_click(self, target_text: Optional[str], state: AgentState) -> SmartClickAction:
+    def _ocr_to_coordinate_click(self, target_text: Optional[str], state: AgentState) -> CoordinateClickAction:
         task_target = (state.task or "").strip()
         if task_target:
             target = task_target
@@ -356,7 +332,7 @@ IMPORTANT:
             target = f"{target_text} icon or label"
         else:
             target = "the requested target"
-        return SmartClickAction(
+        return CoordinateClickAction(
             target=target,
             prefer_primary=True,
             button="left",
@@ -368,7 +344,7 @@ IMPORTANT:
         action = response.action
         if isinstance(action, OCRClickAction):
             if self._should_avoid_ocr(action.text, state):
-                response.action = self._ocr_to_smart_click(action.text, state)
+                response.action = self._ocr_to_coordinate_click(action.text, state)
             return response
 
         if isinstance(action, ChainAction):
@@ -380,7 +356,7 @@ IMPORTANT:
                         target = (state.task or "").strip() or (step.text or "the requested target")
                         new_steps.append(
                             ChainedStep(
-                                action_type="smart_click",
+                                action_type="coordinate_click",
                                 text=target,
                                 target=target,
                                 button=step.button or "left",

@@ -26,7 +26,7 @@ from .planner import get_planner, AgentState
 from .click_pipeline import get_click_pipeline
 from .actions import (
     ActionType, KeypressAction, TypeAction, HotkeyAction,
-    OCRClickAction, SmartClickAction, MouseClickAction, MouseMoveAction,
+    OCRClickAction, CoordinateClickAction, MouseClickAction, MouseMoveAction,
     ScrollAction, DragAction, WaitAction, VisionClickAction,
     ChainAction, ChainedStep,
     DoneAction, FailAction, AgentAction
@@ -86,7 +86,7 @@ class AgentLoop:
         
         self._stop_requested = False
         self._on_step_callback: Optional[Callable] = None
-        self._on_image_callback: Optional[Callable] = None  # Real-time image callback for smart_click
+        self._on_image_callback: Optional[Callable] = None  # Real-time image callback for coordinate_click
         self._on_status_callback: Optional[Callable] = None  # Real-time status callback
         
         # Start the viewer if enabled
@@ -248,8 +248,7 @@ class AgentLoop:
         
         # 5. Execute action
         if self._on_status_callback:
-            # Include target description for smart_click
-            if isinstance(action, SmartClickAction):
+            if isinstance(action, CoordinateClickAction):
                 self._on_status_callback(f"Step {state.step_number}: Executing {action.action_type} - '{action.target}'")
             else:
                 self._on_status_callback(f"Step {state.step_number}: Executing {action.action_type}...")
@@ -276,7 +275,7 @@ class AgentLoop:
         # Callback with full AI output
         if self._on_step_callback:
             # Pass thought and plan details to callback
-            # Also pass debug images if available (from smart_click)
+            # Also pass debug images if available (from coordinate_click)
             debug_image = None
             if hasattr(result, 'data') and result.data and 'debug_images' in result.data:
                 debug_images = result.data['debug_images']
@@ -360,13 +359,10 @@ class AgentLoop:
                 return ActionResult(False, f"Waited {action.seconds}s, condition not met")
             return ActionResult(True, f"Waited {action.seconds} seconds")
         
-        elif isinstance(action, SmartClickAction):
-            # Use smart vision-based clicking with two-step zoom method
-            # AI will click immediately if confident, otherwise zoom then click
+        elif isinstance(action, CoordinateClickAction):
             if self._on_status_callback:
                 self._on_status_callback(f"Coordinate click: Looking for '{action.target}'...")
 
-            # Use the coordinate-finder pipeline exclusively (no vision_click fallback).
             pipeline_point = None
             try:
                 pipeline = self.click_pipeline or get_click_pipeline()
@@ -404,7 +400,7 @@ class AgentLoop:
 
             return ActionResult(
                 False,
-                f"Smart click failed: coordinate-finder pipeline could not find '{action.target}'",
+                f"Coordinate click failed: coordinate-finder pipeline could not find '{action.target}'",
                 screenshot=screenshot,
             )
         
@@ -463,8 +459,8 @@ class AgentLoop:
                         button=button
                     )
                     step_result = result
-                elif step.action_type == "smart_click":
-                    # Support smart click in chains
+                elif step.action_type == "coordinate_click":
+                    # Support coordinate click in chains
                     # Use target field if available, otherwise fall back to text
                     target_description = None
                     if hasattr(step, 'target') and step.target:
@@ -473,9 +469,9 @@ class AgentLoop:
                         target_description = step.text
                     
                     if not target_description:
-                        step_result = ActionResult(False, "Smart click requires 'target' or 'text' field with description")
+                        step_result = ActionResult(False, "Coordinate click requires 'target' or 'text' field with description")
                     else:
-                        # Refresh screenshot for smart_click (page may have changed)
+                        # Refresh screenshot for coordinate click (page may have changed)
                         screenshot = self.screen.capture_full()
 
                         # Use coordinate-finder pipeline exclusively.
@@ -505,7 +501,7 @@ class AgentLoop:
                         else:
                             step_result = ActionResult(
                                 False,
-                                f"Smart click failed: coordinate-finder pipeline could not find '{target_description}'"
+                                f"Coordinate click failed: coordinate-finder pipeline could not find '{target_description}'"
                             )
                 elif step.action_type == "click" or step.action_type == "mouse_click":
                     # Support regular mouse click in chains

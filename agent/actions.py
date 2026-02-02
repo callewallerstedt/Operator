@@ -14,7 +14,7 @@ class ActionType(str, Enum):
     TYPE = "type"
     HOTKEY = "hotkey"
     OCR_CLICK = "ocr_click"
-    SMART_CLICK = "smart_click"  # AI vision-based clicking
+    COORDINATE_CLICK = "coordinate_click"
     MOUSE_CLICK = "mouse_click"
     MOUSE_MOVE = "mouse_move"
     MOUSE_SCROLL = "scroll"
@@ -124,36 +124,35 @@ class WaitAction(BaseModel):
     description: str = Field(description="Human-readable description")
 
 
-class SmartClickAction(BaseModel):
+class CoordinateClickAction(BaseModel):
     """
-    Use AI vision to find and click on a UI element.
-    This is the PRIMARY method for clicking buttons, links, etc.
-    Much more reliable than OCR for finding the correct element.
+    Uses the coordinate-finder pipeline to locate and click UI elements.
+    This is the ONLY click action the agent should emit.
     
     Supports:
     - Single click (default)
-    - Double click (clicks=2) - for opening files, folders, etc.
-    - Right click (button="right") - for context menus, save image, etc.
+    - Double click (clicks=2) for opening files/folders
+    - Right click (button="right") for context menus
     """
-    action_type: Literal["smart_click"] = "smart_click"
+    action_type: Literal["coordinate_click"] = "coordinate_click"
     target: str = Field(
         description="Detailed description of what to click (e.g., 'the blue Accept All button')"
     )
     prefer_primary: bool = Field(
         default=True,
-        description="Prefer primary/main action buttons when multiple similar buttons exist"
+        description="Prefer the main/primary action when multiple candidates exist"
     )
     button: Literal["left", "right", "middle"] = Field(default="left")
     clicks: int = Field(
         default=1,
-        description="Number of clicks: 1 for single click, 2 for double click"
+        description="Number of clicks: 1 for a single click, 2 for a double click"
     )
     description: str = Field(description="Human-readable description")
 
 
 class VisionClickAction(BaseModel):
     """
-    Legacy vision click - use smart_click instead.
+    Legacy vision click - use coordinate_click instead.
     """
     action_type: Literal["vision_click"] = "vision_click"
     goal: str = Field(
@@ -178,10 +177,10 @@ class FailAction(BaseModel):
 # Simple action types for chaining (without nested model complexity)
 class ChainedStep(BaseModel):
     """A single step in a chain of actions."""
-    action_type: str = Field(description="Type of action: hotkey, type, keypress, wait, smart_click, click, ocr_click")
+    action_type: str = Field(description="Type of action: hotkey, type, keypress, wait, coordinate_click, click, ocr_click")
     keys: Optional[List[str]] = Field(default=None, description="Keys for hotkey/keypress")
-    text: Optional[str] = Field(default=None, description="Text for type/ocr_click action, or target description for smart_click")
-    target: Optional[str] = Field(default=None, description="Target description for smart_click (alternative to text)")
+    text: Optional[str] = Field(default=None, description="Text for type/ocr_click action, or target description for coordinate_click")
+    target: Optional[str] = Field(default=None, description="Target description for coordinate_click (alternative to text)")
     x: Optional[int] = Field(default=None, description="X coordinate for click/mouse actions")
     y: Optional[int] = Field(default=None, description="Y coordinate for click/mouse actions")
     button: Optional[str] = Field(default="left", description="Mouse button: left, right, middle")
@@ -210,7 +209,7 @@ AgentAction = Union[
     TypeAction,
     HotkeyAction,
     OCRClickAction,
-    SmartClickAction,
+    CoordinateClickAction,
     MouseClickAction,
     MouseMoveAction,
     ScrollAction,
@@ -244,7 +243,7 @@ def parse_action_from_dict(data: dict) -> AgentAction:
         "type": TypeAction,
         "hotkey": HotkeyAction,
         "ocr_click": OCRClickAction,
-        "smart_click": SmartClickAction,
+        "coordinate_click": CoordinateClickAction,
         "mouse_click": MouseClickAction,
         "mouse_move": MouseMoveAction,
         "scroll": ScrollAction,
