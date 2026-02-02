@@ -74,7 +74,7 @@ class PlannerTextIntent:
 @dataclass
 class PlannerLocationIntent:
     scope: str = "window"  # "window" | "screen"
-    zone: str = "any"      # "top_bar", "sidebar", "footer", "center", "any"
+    zone: str = "any"      # "top_bar", "left", "right", "footer", "center", "any" ("sidebar" aliases "left")
     position: str = "any"  # "top_left", "top", "top_right", "left", "center", "right", "bottom_left", "bottom", "bottom_right", "any"
 
 
@@ -2241,10 +2241,12 @@ class CoordinateFinderApp:
             "overlap_x_pct": 0.08,
             "overlap_y_pct": 0.08,
             "top_bar_h_pct": 0.30,
+            "left_w_pct": 0.35,
+            "right_w_pct": 0.35,
             "sidebar_w_pct": 0.35,
             "footer_h_pct": 0.25,
-            "center_w_pct": 0.90,
-            "center_h_pct": 0.90,
+            "center_w_pct": 0.65,  # shrink center region by 35% relative to full width
+            "center_h_pct": 0.65,  # shrink center region by 35% relative to full height
         }
 
     def _nm_load_roi_settings(self) -> Dict[str, float]:
@@ -2269,6 +2271,12 @@ class CoordinateFinderApp:
             if val > 1.0:
                 val = 1.0
             merged[key] = val
+
+        # Backwards-compat: if old JSON only had sidebar width, copy it to left/right.
+        if "left_w_pct" not in data and "sidebar_w_pct" in data:
+            merged["left_w_pct"] = merged.get("sidebar_w_pct", defaults.get("left_w_pct", 0.35))
+        if "right_w_pct" not in data and "sidebar_w_pct" in data:
+            merged["right_w_pct"] = merged.get("sidebar_w_pct", defaults.get("right_w_pct", 0.35))
         return merged
 
     def _nm_save_roi_settings(self) -> None:
@@ -2792,7 +2800,7 @@ class CoordinateFinderApp:
 
         nav = ttk.Frame(win, style='Dark.TFrame')
         nav.pack(fill=tk.X, padx=10, pady=(0, 8))
-        self._roi_zones = ["any", "top_bar", "sidebar", "footer", "center"]
+        self._roi_zones = ["any", "top_bar", "left", "right", "footer", "center"]
         self._roi_preview_index = 0
         self._roi_zone_label = ttk.Label(nav, text="ROI: any", style='Dark.TLabel')
         self._roi_zone_label.pack(side=tk.LEFT)
@@ -2811,7 +2819,8 @@ class CoordinateFinderApp:
             ("overlap_x_pct", "Overlap X (%)"),
             ("overlap_y_pct", "Overlap Y (%)"),
             ("top_bar_h_pct", "Top bar height (%)"),
-            ("sidebar_w_pct", "Sidebar width (%)"),
+            ("left_w_pct", "Left panel width (%)"),
+            ("right_w_pct", "Right panel width (%)"),
             ("footer_h_pct", "Footer height (%)"),
             ("center_w_pct", "Center width (%)"),
             ("center_h_pct", "Center height (%)"),
@@ -5373,13 +5382,14 @@ Your job:
    - strictness: "high", "medium", or "low" (how strict matching should be)
 
 2) Describe the LOCATION INTENT:
-   - scope: "window" or "screen"
-   - zone: one of ["top_bar", "sidebar", "footer", "center", "any"]
-   - position: one of ["top_left", "top", "top_right", "left", "center", "right", "bottom_left", "bottom", "bottom_right", "any"]
+        - scope: "window" or "screen"
+        - zone: one of ["top_bar", "left", "right", "footer", "center", "any"] ("sidebar" is treated as left)
+        - position: one of ["top_left", "top", "top_right", "left", "center", "right", "bottom_left", "bottom", "bottom_right", "any"]
 
 Zone definitions (approximate, with overlap):
 - top_bar: top ~30% of the window (overlaps downwards)
-- sidebar: left ~35% of the window (overlaps rightwards)
+- left: left ~35% of the window (overlaps rightwards; also called "sidebar")
+- right: right ~35% of the window (overlaps leftwards)
 - footer: bottom ~25% of the window (overlaps upwards)
 - center: middle ~90% of the window (very wide; includes edges)
 - any: full window
@@ -5415,7 +5425,7 @@ Schema:
   },
   "location_intent": {
     "scope": "window|screen",
-    "zone": "top_bar|sidebar|footer|center|any",
+    "zone": "top_bar|left|right|footer|center|any",
     "position": "top_left|top|top_right|left|center|right|bottom_left|bottom|bottom_right|any"
   },
   "visual_intent": {
@@ -5597,9 +5607,11 @@ Schema:
         height = bottom - top
 
         settings = self.nm_roi_settings if isinstance(getattr(self, "nm_roi_settings", None), dict) else self._nm_roi_settings_defaults()
+        left_width_pct = settings.get("left_w_pct", settings.get("sidebar_w_pct", 0.35))
+        right_width_pct = settings.get("right_w_pct", settings.get("sidebar_w_pct", 0.35))
 
         # Default: full window
-        if zone not in {"top_bar", "sidebar", "footer", "center"}:
+        if zone not in {"top_bar", "sidebar", "footer", "center", "left", "right"}:
             return ScreenRegion(left=left, top=top, width=width, height=height)
 
         overlap_x = int(width * settings.get("overlap_x_pct", 0.08))
@@ -5616,9 +5628,13 @@ Schema:
             # Wider top bar to avoid missing edge items
             h = int(height * settings.get("top_bar_h_pct", 0.30))
             return clamp_rect(left, top, right, top + h)
-        if zone == "sidebar":
-            w = int(width * settings.get("sidebar_w_pct", 0.35))
+        if zone in {"sidebar", "left"}:
+            w = int(width * left_width_pct)
             return clamp_rect(left, top, left + w, bottom)
+        if zone == "right":
+            w = int(width * right_width_pct)
+            l = right - w
+            return clamp_rect(l, top, right, bottom)
         if zone == "footer":
             h = int(height * settings.get("footer_h_pct", 0.25))
             return clamp_rect(left, bottom - h, right, bottom)
