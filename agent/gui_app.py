@@ -8,8 +8,11 @@ from tkinter import ttk, scrolledtext, messagebox
 import threading
 import queue
 import time
+import json
+import os
 import locale
 import ctypes
+from pathlib import Path
 from typing import Optional, List, Tuple
 from dataclasses import dataclass
 from PIL import Image, ImageTk
@@ -83,6 +86,23 @@ class AgentGUI:
         
         # Build UI
         self._create_widgets()
+
+        # Optional auto-start from environment (used by Discord bot launcher)
+        self._auto_prompt = os.getenv("AGENT_PROMPT", "").strip()
+        self._auto_start = os.getenv("AGENT_AUTO_START", "").strip().lower() in {"1", "true", "yes", "on"}
+        self._step_log_path = os.getenv("AGENT_STEP_LOG", "").strip()
+        self._session_id = os.getenv("AGENT_SESSION_ID", "").strip()
+        self._step_log_lock = threading.Lock()
+        self._run_dir = None
+
+        if self._auto_prompt:
+            try:
+                self.task_entry.delete("1.0", tk.END)
+                self.task_entry.insert("1.0", self._auto_prompt)
+            except Exception:
+                pass
+        if self._auto_prompt and self._auto_start:
+            self.root.after(500, self._start_task)
         # Defer monitor loading until needed (lazy loading)
         
         # Start message processing
@@ -759,6 +779,16 @@ class AgentGUI:
             # Custom step callback with full AI output and debug images
             def on_step(step_num, action, result, thought=None, plan=None, debug_image=None):
                 self.message_queue.put(("step", step_num, action, result, thought, plan))
+                self._append_step_log({
+                    "type": "step",
+                    "session_id": self._session_id,
+                    "step": step_num,
+                    "thought": thought or "",
+                    "action_type": getattr(action, "action_type", ""),
+                    "action": getattr(action, "description", str(action)),
+                    "success": bool(getattr(result, "success", False)),
+                    "result": getattr(result, "message", ""),
+                })
                 # Send debug image if available (from smart_click)
                 if debug_image:
                     self.message_queue.put(("debug_image", debug_image, f"Step {step_num} - Smart Click Overlay"))
@@ -770,6 +800,33 @@ class AgentGUI:
             # Real-time image callback for smart_click overlays
             def on_image(image, info_text):
                 self.message_queue.put(("smart_click_image", image, info_text))
+
+            def on_screenshot(step_num, image):
+                self.message_queue.put(("screenshot", image, f"Step {step_num} (start)"))
+                path = self._save_step_image(image, step_num, "start")
+                if path:
+                    self._append_step_log({
+                        "type": "screenshot",
+                        "session_id": self._session_id,
+                        "step": step_num,
+                        "path": str(path),
+                        "label": "start",
+                    })
+
+            def on_plan(step_num, plan):
+                thought = getattr(plan, "thought", "") if plan else ""
+                action = getattr(plan, "action", None)
+                action_desc = getattr(action, "description", str(action)) if action else ""
+                action_type = getattr(action, "action_type", "") if action else ""
+                self.message_queue.put(("plan", step_num, thought, action_type, action_desc))
+                self._append_step_log({
+                    "type": "plan",
+                    "session_id": self._session_id,
+                    "step": step_num,
+                    "thought": thought or "",
+                    "action_type": action_type or "",
+                    "action": action_desc or "",
+                })
             
             # Real-time status callback
             def on_status(status_text):
@@ -778,20 +835,35 @@ class AgentGUI:
             # Set callbacks on agent
             self.agent._on_image_callback = on_image
             self.agent._on_status_callback = on_status
+            self.agent._on_plan_callback = on_plan
+            self.agent._on_screenshot_callback = on_screenshot
             
             # Set system language in planner state
             from .planner import AgentState as PlannerState
             
             # Run with language context
             enhanced_task = f"{task}\n\n[System language: {self.system_language}. UI elements may be in {self.system_language}.]"
-            
+
             self.terminal_output(f">>> STARTING TASK: {task}", "info")
             self.terminal_output(f">>> SYSTEM LANGUAGE: {self.system_language}", "info")
             self.terminal_output(">>> AI AGENT INITIALIZED\n", "info")
+            self._append_step_log({
+                "type": "start",
+                "session_id": self._session_id,
+                "task": task,
+                "system_language": self.system_language,
+            })
             
             result = self.agent.run(enhanced_task, on_step=on_step, system_language=self.system_language)
-            
+
             self.terminal_output(f"\n>>> TASK COMPLETED: {result.status.value}", "info")
+            self._append_step_log({
+                "type": "complete",
+                "session_id": self._session_id,
+                "status": result.status.value,
+                "steps": result.steps_taken,
+                "final_message": result.final_message,
+            })
             
             # Send result
             self.message_queue.put(("complete", result))
@@ -808,6 +880,30 @@ class AgentGUI:
                     pass
             self.agent = None
             self.terminal_output(">>> AGENT CLEANUP COMPLETE", "info")
+
+    def _append_step_log(self, payload: dict) -> None:
+        if not self._step_log_path:
+            return
+        try:
+            line = json.dumps(payload, ensure_ascii=False)
+            with self._step_log_lock:
+                with open(self._step_log_path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except Exception:
+            pass
+
+    def _save_step_image(self, image: Image.Image, step_num: int, label: str) -> Optional[Path]:
+        if not self._step_log_path:
+            return None
+        try:
+            if self._run_dir is None:
+                self._run_dir = Path(self._step_log_path).parent
+            filename = f"screenshot_step_{step_num}_{label}.png"
+            path = self._run_dir / filename
+            image.save(path, format="PNG")
+            return path
+        except Exception:
+            return None
     
     def _process_messages(self):
         """Process messages from the agent thread."""
@@ -924,6 +1020,17 @@ class AgentGUI:
                     self.action_status_var.set(status_text)
                     # Also log it
                     self.terminal_output(f"[STATUS] {status_text}", "info")
+                elif msg_type == "plan":
+                    _, step_num, thought, action_type, action_desc = msg
+                    self.terminal_output(f"PLAN STEP {step_num}", "info")
+                    if thought:
+                        self.terminal_output(f"THOUGHT: {thought}", "info")
+                    if action_desc:
+                        if action_type:
+                            self.terminal_output(f"ACTION: {action_type} - {action_desc}", "info")
+                        else:
+                            self.terminal_output(f"ACTION: {action_desc}", "info")
+                    self.terminal_output("", "info")
                 
         except queue.Empty:
             pass

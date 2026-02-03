@@ -1,2 +1,11 @@
 .env
 SeeClick
+__pycache__/
+*.pyc
+agent/__pycache__/
+agent_runs/
+*_debug.png
+blue_region_*.png
+tessdata/
+tessdata_best/
+images/bestall_nu.png

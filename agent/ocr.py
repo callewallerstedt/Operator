@@ -5,7 +5,8 @@ Uses Tesseract for reliable text extraction with bounding boxes.
 
 import re
 import os
-from typing import List, Optional, Tuple
+import io
+from typing import List, Optional, Tuple, Protocol
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -14,6 +15,24 @@ import pytesseract
 
 from .config import config
 from .screenshot import ScreenRegion
+
+
+class BaseOCREngine(Protocol):
+    def process(
+        self,
+        image: Image.Image,
+        offset: Tuple[int, int] = (0, 0),
+        include_phrases: bool = True,
+    ) -> "OCRResult":
+        ...
+
+    def process_with_preprocessing(
+        self,
+        image: Image.Image,
+        offset: Tuple[int, int] = (0, 0),
+        include_phrases: bool = True,
+    ) -> "OCRResult":
+        ...
 
 
 @dataclass
@@ -295,9 +314,13 @@ class OCREngine:
 
     def _select_language(self) -> str:
         """Pick the best available language combo for OCR."""
-        lang_to_use = self.language
+        lang_to_use = (self.language or "").strip()
         try:
             available = set(pytesseract.get_languages(config=""))
+            if lang_to_use:
+                parts = [p.strip() for p in lang_to_use.replace(",", "+").split("+") if p.strip()]
+                if parts and all(p in available for p in parts):
+                    return "+".join(parts)
             if "swe" in available and "eng" in available:
                 lang_to_use = "swe+eng"
             elif "swe" in available:
@@ -307,6 +330,38 @@ class OCREngine:
         except Exception:
             lang_to_use = self.language
         return lang_to_use
+
+    def _binarize_otsu(self, gray: Image.Image, fallback: int = 160) -> Image.Image:
+        """Binarize a grayscale image using Otsu thresholding (with fallback)."""
+        try:
+            import numpy as np
+        except Exception:
+            return gray.point(lambda p: 255 if p > fallback else 0)
+        arr = np.array(gray)
+        if arr.size == 0:
+            return gray
+        hist = np.bincount(arr.ravel(), minlength=256).astype(float)
+        total = float(arr.size)
+        sum_total = float((np.arange(256) * hist).sum())
+        sum_b = 0.0
+        w_b = 0.0
+        var_max = 0.0
+        threshold = fallback
+        for i in range(256):
+            w_b += hist[i]
+            if w_b == 0:
+                continue
+            w_f = total - w_b
+            if w_f == 0:
+                break
+            sum_b += i * hist[i]
+            m_b = sum_b / w_b
+            m_f = (sum_total - sum_b) / w_f
+            var_between = w_b * w_f * (m_b - m_f) ** 2
+            if var_between > var_max:
+                var_max = var_between
+                threshold = i
+        return gray.point(lambda p: 255 if p > threshold else 0)
     
     def process(
         self,
@@ -411,9 +466,9 @@ class OCREngine:
 
         # If recall is low, add a couple of stronger-but-cleaner passes
         try:
-            if len(word_matches) < 80:
-                from PIL import ImageEnhance, ImageFilter, ImageOps
+            from PIL import ImageEnhance, ImageFilter, ImageOps
 
+            if len(word_matches) < 80:
                 # Low-contrast boost (white on color backgrounds)
                 enhanced = ImageOps.autocontrast(image_rgb, cutoff=1)
                 enhanced = ImageEnhance.Contrast(enhanced).enhance(1.6)
@@ -422,7 +477,7 @@ class OCREngine:
                     enhanced,
                     lang=lang_to_use,
                     output_type=pytesseract.Output.DICT,
-                    config="--oem 3 --psm 6 -c preserve_interword_spaces=1"
+                    config="--oem 3 --psm 6 -c preserve_interword_spaces=1",
                 )
                 word_matches = merge_matches(word_matches, extract_word_matches(data_enhanced, min_conf_base=10.0))
 
@@ -437,9 +492,66 @@ class OCREngine:
                     inv_rgb,
                     lang=lang_to_use,
                     output_type=pytesseract.Output.DICT,
-                    config="--oem 3 --psm 6 -c preserve_interword_spaces=1"
+                    config="--oem 3 --psm 6 -c preserve_interword_spaces=1",
                 )
-                word_matches = merge_matches(word_matches, extract_word_matches(data_inv, min_conf_base=20.0))
+                word_matches = merge_matches(word_matches, extract_word_matches(data_inv, min_conf_base=12.0))
+
+            if len(word_matches) < 50:
+                # V-channel binarization for light text on dark/color backgrounds
+                hsv = image_rgb.convert("HSV")
+                v = hsv.split()[2]
+                v = ImageOps.autocontrast(v, cutoff=2)
+                v = ImageEnhance.Contrast(v).enhance(1.8)
+                v = v.filter(ImageFilter.UnsharpMask(radius=1, percent=130, threshold=3))
+                bw_v = self._binarize_otsu(v, fallback=165)
+                data_v = pytesseract.image_to_data(
+                    bw_v,
+                    lang=lang_to_use,
+                    output_type=pytesseract.Output.DICT,
+                    config="--oem 3 --psm 6 -c preserve_interword_spaces=1",
+                )
+                word_matches = merge_matches(word_matches, extract_word_matches(data_v, min_conf_base=8.0))
+
+            if len(word_matches) < 45:
+                # Low-saturation bright text (e.g., white on blue buttons)
+                try:
+                    import numpy as np
+                except Exception:
+                    np = None
+                if np is not None:
+                    hsv = image_rgb.convert("HSV")
+                    h, s, v = hsv.split()
+                    s_arr = np.array(s)
+                    v_arr = np.array(v)
+                    # Bright + low saturation tends to capture white/light text
+                    mask = (v_arr > 150) & (s_arr < 90)
+                    mask_img = Image.fromarray((mask.astype(np.uint8) * 255), mode="L")
+                    # Thicken thin glyphs a bit
+                    mask_img = mask_img.filter(ImageFilter.MaxFilter(3))
+                    bw_ls = ImageOps.invert(mask_img)  # black text on white
+                    data_ls = pytesseract.image_to_data(
+                        bw_ls,
+                        lang=lang_to_use,
+                        output_type=pytesseract.Output.DICT,
+                        config="--oem 3 --psm 6 -c preserve_interword_spaces=1",
+                    )
+                    word_matches = merge_matches(word_matches, extract_word_matches(data_ls, min_conf_base=6.0))
+
+            if len(word_matches) < 40:
+                # Aggressive inverted-binary pass for very low-contrast light text
+                gray = image_rgb.convert("L")
+                inv = ImageOps.invert(gray)
+                inv = ImageOps.autocontrast(inv, cutoff=1)
+                inv = ImageEnhance.Contrast(inv).enhance(1.6)
+                bw_inv = self._binarize_otsu(inv, fallback=160)
+                bw_inv = bw_inv.filter(ImageFilter.MaxFilter(3))
+                data_inv_bw = pytesseract.image_to_data(
+                    bw_inv,
+                    lang=lang_to_use,
+                    output_type=pytesseract.Output.DICT,
+                    config="--oem 3 --psm 6 -c preserve_interword_spaces=1",
+                )
+                word_matches = merge_matches(word_matches, extract_word_matches(data_inv_bw, min_conf_base=6.0))
         except Exception:
             pass
         
@@ -522,7 +634,7 @@ class OCREngine:
         include_phrases: bool = True
     ) -> OCRResult:
         """Process image with preprocessing for better accuracy."""
-        from PIL import ImageEnhance, ImageFilter, ImageOps
+        from PIL import ImageEnhance, ImageFilter, ImageOps, ImageStat
 
         # Convert to grayscale and upscale to preserve small UI text
         gray = image.convert("L")
@@ -532,6 +644,9 @@ class OCREngine:
             scale = 2
         if w < 800 or h < 600:
             scale = 3
+        # Large screenshots still contain small UI text; upscale for better recall.
+        if scale == 1 and (w >= 1400 or h >= 900):
+            scale = 2
         upscaled = gray.resize((w * scale, h * scale), Image.Resampling.LANCZOS)
 
         # Boost contrast and normalize
@@ -541,8 +656,15 @@ class OCREngine:
         # Sharpen edges for crisp text
         sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=160, threshold=3))
 
-        # Light binarization to separate text from background
-        bw = sharpened.point(lambda p: 255 if p > 165 else 0)
+        # Light binarization to separate text from background (adaptive)
+        bw = self._binarize_otsu(sharpened, fallback=165)
+        try:
+            avg = ImageStat.Stat(sharpened).mean[0]
+            if avg < 120:
+                # Dark background -> invert so text becomes dark on light
+                bw = ImageOps.invert(bw)
+        except Exception:
+            pass
 
         # Run OCR directly so we can scale boxes back down to original coords
         lang_to_use = self._select_language()
@@ -640,12 +762,331 @@ class OCREngine:
 
 
 # Singleton instance
-_ocr_instance: Optional[OCREngine] = None
+class EasyOCREngine:
+    """EasyOCR-based OCR engine (free, no Tesseract dependency)."""
+
+    def __init__(self):
+        # Avoid Unicode progress bar issues on Windows consoles.
+        os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+        os.environ.setdefault("PYTHONUTF8", "1")
+        self.language = config.ocr_language
+        self.languages = self._select_languages()
+        self._reader = self._init_reader()
+
+    def _select_languages(self) -> List[str]:
+        lang_str = (self.language or "").strip()
+        if not lang_str:
+            return ["sv", "en"]
+        parts = re.split(r"[,+\s]+", lang_str.lower())
+        mapping = {
+            "swe": "sv",
+            "sv": "sv",
+            "eng": "en",
+            "en": "en",
+        }
+        langs: List[str] = []
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            code = mapping.get(p, p)
+            if code not in langs:
+                langs.append(code)
+        if not langs:
+            langs = ["sv", "en"]
+        return langs
+
+    def _init_reader(self):
+        try:
+            import easyocr
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "EasyOCR is not installed. Install with: python -m pip install easyocr"
+            ) from exc
+        gpu_setting = (config.easyocr_gpu or "").strip().lower()
+        if gpu_setting in ("1", "true", "yes", "on"):
+            use_gpu = True
+        elif gpu_setting in ("0", "false", "no", "off"):
+            use_gpu = False
+        else:
+            try:
+                import torch
+                use_gpu = bool(torch.cuda.is_available())
+            except Exception:
+                use_gpu = False
+        return easyocr.Reader(self.languages, gpu=use_gpu, verbose=False)
+
+    @staticmethod
+    def _bbox_from_points(points) -> Tuple[int, int, int, int]:
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        left = int(min(xs))
+        top = int(min(ys))
+        right = int(max(xs))
+        bottom = int(max(ys))
+        return left, top, right, bottom
+
+    def _process_image(
+        self,
+        image: Image.Image,
+        offset: Tuple[int, int],
+    ) -> OCRResult:
+        try:
+            import numpy as np
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError("numpy is required for EasyOCR") from exc
+
+        img_rgb = image.convert("RGB")
+        arr = np.array(img_rgb)
+        result = self._reader.readtext(arr)
+
+        matches: List[OCRMatch] = []
+        for item in result:
+            if len(item) < 3:
+                continue
+            bbox_points, text, conf = item
+            if not text:
+                continue
+            left, top, right, bottom = self._bbox_from_points(bbox_points)
+            bbox = ScreenRegion(
+                left=left + offset[0],
+                top=top + offset[1],
+                width=max(1, right - left),
+                height=max(1, bottom - top),
+            )
+            # EasyOCR confidence is 0..1
+            conf_pct = float(conf) * 100.0 if float(conf) <= 1.0 else float(conf)
+            matches.append(
+                OCRMatch(
+                    text=text,
+                    confidence=conf_pct,
+                    bbox=bbox,
+                    source="phrase",
+                )
+            )
+
+        raw_text = " ".join([m.text for m in matches])
+        return OCRResult(matches=matches, raw_text=raw_text)
+
+    def process(
+        self,
+        image: Image.Image,
+        offset: Tuple[int, int] = (0, 0),
+        include_phrases: bool = True,
+    ) -> OCRResult:
+        return self._process_image(image, offset)
+
+    def process_with_preprocessing(
+        self,
+        image: Image.Image,
+        offset: Tuple[int, int] = (0, 0),
+        include_phrases: bool = True,
+    ) -> OCRResult:
+        try:
+            from PIL import ImageEnhance, ImageFilter, ImageOps, ImageStat
+
+            gray = image.convert("L")
+            normalized = ImageOps.autocontrast(gray, cutoff=2)
+            enhanced = ImageEnhance.Contrast(normalized).enhance(1.8)
+            sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=1, percent=140, threshold=3))
+            bw = sharpened
+            try:
+                avg = ImageStat.Stat(sharpened).mean[0]
+                if avg < 120:
+                    bw = ImageOps.invert(sharpened)
+            except Exception:
+                pass
+            return self._process_image(bw.convert("RGB"), offset)
+        except Exception:
+            return self._process_image(image, offset)
 
 
-def get_ocr_engine() -> OCREngine:
+# Singleton instance
+class TextractOCREngine:
+    """AWS Textract-based OCR engine (cloud)."""
+
+    def __init__(self):
+        try:
+            import boto3
+        except Exception as exc:  # pragma: no cover
+            raise RuntimeError(
+                "boto3 is required for Textract. Install with: python -m pip install boto3"
+            ) from exc
+
+        self._boto3 = boto3
+        self.region = (
+            (os.getenv("AWS_REGION") or "").strip()
+            or (os.getenv("AWS_DEFAULT_REGION") or "").strip()
+            or "us-east-1"
+        )
+        # Allow explicit credentials via env, otherwise boto3 will use its default chain.
+        self.access_key = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
+        self.secret_key = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
+        self.session_token = (os.getenv("AWS_SESSION_TOKEN") or "").strip()
+        self._client = None
+
+    def _get_client(self):
+        if self._client is not None:
+            return self._client
+        kwargs = {"region_name": self.region}
+        if self.access_key and self.secret_key:
+            kwargs["aws_access_key_id"] = self.access_key
+            kwargs["aws_secret_access_key"] = self.secret_key
+            if self.session_token:
+                kwargs["aws_session_token"] = self.session_token
+        self._client = self._boto3.client("textract", **kwargs)
+        return self._client
+
+    @staticmethod
+    def _bbox_to_pixels(bbox: dict, width: int, height: int) -> Tuple[int, int, int, int]:
+        left = int(bbox.get("Left", 0.0) * width)
+        top = int(bbox.get("Top", 0.0) * height)
+        w = int(bbox.get("Width", 0.0) * width)
+        h = int(bbox.get("Height", 0.0) * height)
+        return left, top, left + w, top + h
+
+    def _image_bytes(self, image: Image.Image) -> bytes:
+        """Encode image to JPEG and keep size under Textract 5MB limit."""
+        img = image.convert("RGB")
+
+        def encode_jpeg(quality: int) -> bytes:
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality, optimize=True)
+            return buf.getvalue()
+
+        data = encode_jpeg(85)
+        if len(data) <= 4_700_000:
+            return data
+
+        # Downscale progressively if needed
+        w, h = img.size
+        scale = 0.85
+        while len(data) > 4_700_000 and w > 320 and h > 240:
+            w = int(w * scale)
+            h = int(h * scale)
+            img = img.resize((w, h), Image.Resampling.LANCZOS)
+            data = encode_jpeg(80)
+        return data
+
+    def _process_image(
+        self,
+        image: Image.Image,
+        offset: Tuple[int, int],
+        include_phrases: bool,
+    ) -> OCRResult:
+        client = self._get_client()
+        img_bytes = self._image_bytes(image)
+        response = client.detect_document_text(Document={"Bytes": img_bytes})
+        blocks = response.get("Blocks", [])
+
+        matches: List[OCRMatch] = []
+        width, height = image.size
+
+        for block in blocks:
+            btype = block.get("BlockType")
+            # For Textract, avoid LINE blocks to prevent merged headers (e.g., Excel column letters).
+            if btype != "WORD":
+                continue
+            text = block.get("Text", "")
+            if not text:
+                continue
+            bbox = block.get("Geometry", {}).get("BoundingBox", {})
+            l, t, r, b = self._bbox_to_pixels(bbox, width, height)
+            if r <= l or b <= t:
+                continue
+            conf = float(block.get("Confidence", 0.0))
+            # Heuristic: split merged Excel header letters (e.g., "DCDEFGHIJ") into per-letter boxes.
+            if text.isalpha() and text.isupper() and len(text) >= 2:
+                box_w = max(1, r - l)
+                box_h = max(1, b - t)
+                if box_w / max(1, box_h) >= 3.0:
+                    char_w = box_w / len(text)
+                    for idx, ch in enumerate(text):
+                        cl = int(l + idx * char_w)
+                        cr = int(l + (idx + 1) * char_w)
+                        if cr <= cl:
+                            continue
+                        bbox_region = ScreenRegion(
+                            left=cl + offset[0],
+                            top=t + offset[1],
+                            width=max(1, cr - cl),
+                            height=box_h,
+                        )
+                        matches.append(
+                            OCRMatch(
+                                text=ch,
+                                confidence=conf,
+                                bbox=bbox_region,
+                                source="word",
+                            )
+                        )
+                    continue
+
+            bbox_region = ScreenRegion(
+                left=l + offset[0],
+                top=t + offset[1],
+                width=max(1, r - l),
+                height=max(1, b - t),
+            )
+            matches.append(
+                OCRMatch(
+                    text=text,
+                    confidence=conf,
+                    bbox=bbox_region,
+                    source="word",
+                )
+            )
+
+        raw_text = " ".join([m.text for m in matches])
+        return OCRResult(matches=matches, raw_text=raw_text)
+
+    def process(
+        self,
+        image: Image.Image,
+        offset: Tuple[int, int] = (0, 0),
+        include_phrases: bool = True,
+    ) -> OCRResult:
+        return self._process_image(image, offset, include_phrases)
+
+    def process_with_preprocessing(
+        self,
+        image: Image.Image,
+        offset: Tuple[int, int] = (0, 0),
+        include_phrases: bool = True,
+    ) -> OCRResult:
+        # Textract does its own preprocessing; just run the standard call.
+        return self._process_image(image, offset, include_phrases)
+
+
+# Singleton instance
+_ocr_instance: Optional[BaseOCREngine] = None
+_ocr_instance_kind: Optional[str] = None
+
+
+def get_ocr_engine() -> BaseOCREngine:
     """Get or create the OCR engine singleton."""
-    global _ocr_instance
-    if _ocr_instance is None:
+    global _ocr_instance, _ocr_instance_kind
+    engine_name = (config.ocr_engine or "").strip().lower()
+    if engine_name in ("easyocr", "easy", "easy_ocr"):
+        if _ocr_instance is None or _ocr_instance_kind != "easyocr":
+            try:
+                _ocr_instance = EasyOCREngine()
+                _ocr_instance_kind = "easyocr"
+            except Exception:
+                _ocr_instance = OCREngine()
+                _ocr_instance_kind = "tesseract"
+        return _ocr_instance
+    if engine_name in ("textract", "aws_textract", "aws-textract"):
+        if _ocr_instance is None or _ocr_instance_kind != "textract":
+            try:
+                _ocr_instance = TextractOCREngine()
+                _ocr_instance_kind = "textract"
+            except Exception:
+                _ocr_instance = OCREngine()
+                _ocr_instance_kind = "tesseract"
+        return _ocr_instance
+
+    if _ocr_instance is None or _ocr_instance_kind != "tesseract":
         _ocr_instance = OCREngine()
+        _ocr_instance_kind = "tesseract"
     return _ocr_instance
