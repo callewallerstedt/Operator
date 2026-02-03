@@ -129,6 +129,10 @@ Examples of other coordinate clicks:
 - Double-click file: {"action_type": "coordinate_click", "target": "Chrome icon on the desktop (double-click anywhere on the icon)", "clicks": 2, "description": "Launch Chrome"}
 - Right-click: {"action_type": "coordinate_click", "target": "The ribbon area labeled 'File' (for the context menu)", "button": "right", "description": "Open context menu"}
 
+Shorthand actions are allowed:
+- coordinate_double_click: same as coordinate_click with clicks=2
+- coordinate_right_click: same as coordinate_click with button="right"
+
 IMPORTANT for coordinate_click:
 - Be SPECIFIC and DESCRIPTIVE about what to click and how it sits among other UI elements.
 - Mention relative position ("top-right", "left of the address bar", "below the header text") and colors/labels when helpful.
@@ -172,7 +176,7 @@ For coordinate clicks inside chains, provide the target description in the `text
 
 IMPORTANT for chain:
 - Use for keyboard sequences (hotkey, type, keypress)
-- Can include coordinate_click, ocr_click, wait, click actions too
+- Can include coordinate_click, coordinate_double_click, coordinate_right_click, ocr_click, wait, click actions too
 - Provide detailed `text`/`target` when using coordinate_click steps
 - Be SPECIFIC: "YouTube search bar" is better than "search bar", "the blue Accept All button" is better than "accept"
 - For click/mouse_click: provide x and y coordinates

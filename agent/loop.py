@@ -26,7 +26,8 @@ from .planner import get_planner, AgentState
 from .click_pipeline import get_click_pipeline
 from .actions import (
     ActionType, KeypressAction, TypeAction, HotkeyAction,
-    OCRClickAction, CoordinateClickAction, MouseClickAction, MouseMoveAction,
+    OCRClickAction, CoordinateClickAction, CoordinateDoubleClickAction, CoordinateRightClickAction,
+    MouseClickAction, MouseMoveAction,
     ScrollAction, DragAction, WaitAction, VisionClickAction,
     ChainAction, ChainedStep,
     DoneAction, FailAction, AgentAction
@@ -365,7 +366,7 @@ class AgentLoop:
                 return ActionResult(False, f"Waited {action.seconds}s, condition not met")
             return ActionResult(True, f"Waited {action.seconds} seconds")
         
-        elif isinstance(action, CoordinateClickAction):
+        elif isinstance(action, (CoordinateClickAction, CoordinateDoubleClickAction, CoordinateRightClickAction)):
             if self._on_status_callback:
                 self._on_status_callback(f"Coordinate click: Looking for '{action.target}'...")
 
@@ -386,17 +387,23 @@ class AgentLoop:
                     self._on_status_callback(f"Click pipeline error: {exc}")
                 pipeline_point = None
 
+            clicks = getattr(action, "clicks", 1)
+            button_value = getattr(action, "button", "left")
+            if isinstance(action, CoordinateDoubleClickAction):
+                clicks = 2
+            elif isinstance(action, CoordinateRightClickAction):
+                button_value = "right"
+
             if pipeline_point:
                 abs_x = pipeline_point[0] + self.monitor_offset[0]
                 abs_y = pipeline_point[1] + self.monitor_offset[1]
-                click_type = "Double-clicking" if action.clicks == 2 else ("Right-clicking" if action.button == "right" else "Clicking")
+                click_type = "Double-clicking" if clicks == 2 else ("Right-clicking" if button_value == "right" else "Clicking")
                 if self._on_status_callback:
                     self._on_status_callback(f"{click_type} at ({abs_x}, {abs_y})...")
-                button = MouseButton(action.button)
-                clicks = getattr(action, 'clicks', 1)
+                button = MouseButton(button_value)
                 click_result = self.mouse.click(abs_x, abs_y, button=button, clicks=clicks)
                 if click_result.success:
-                    click_desc = "Double-clicked" if clicks == 2 else ("Right-clicked" if action.button == "right" else "Clicked")
+                    click_desc = "Double-clicked" if clicks == 2 else ("Right-clicked" if button_value == "right" else "Clicked")
                     return ActionResult(
                         True,
                         f"{click_desc} on '{action.target}' at ({abs_x}, {abs_y})",
@@ -465,7 +472,7 @@ class AgentLoop:
                         button=button
                     )
                     step_result = result
-                elif step.action_type == "coordinate_click":
+                elif step.action_type in ("coordinate_click", "coordinate_double_click", "coordinate_right_click"):
                     # Support coordinate click in chains
                     # Use target field if available, otherwise fall back to text
                     target_description = None
@@ -497,6 +504,10 @@ class AgentLoop:
                             abs_y = pipeline_point[1] + self.monitor_offset[1]
                             button_str = getattr(step, 'button', 'left') or 'left'
                             num_clicks = getattr(step, 'clicks', 1) or 1
+                            if step.action_type == "coordinate_double_click":
+                                num_clicks = 2
+                            elif step.action_type == "coordinate_right_click":
+                                button_str = "right"
                             click_type = "Double-clicking" if num_clicks == 2 else ("Right-clicking" if button_str == "right" else "Clicking")
                             if self._on_status_callback:
                                 self._on_status_callback(f"{click_type} at ({abs_x}, {abs_y})...")

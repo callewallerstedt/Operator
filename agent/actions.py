@@ -15,6 +15,8 @@ class ActionType(str, Enum):
     HOTKEY = "hotkey"
     OCR_CLICK = "ocr_click"
     COORDINATE_CLICK = "coordinate_click"
+    COORDINATE_DOUBLE_CLICK = "coordinate_double_click"
+    COORDINATE_RIGHT_CLICK = "coordinate_right_click"
     MOUSE_CLICK = "mouse_click"
     MOUSE_MOVE = "mouse_move"
     MOUSE_SCROLL = "scroll"
@@ -150,6 +152,39 @@ class CoordinateClickAction(BaseModel):
     description: str = Field(description="Human-readable description")
 
 
+class CoordinateDoubleClickAction(BaseModel):
+    """
+    Coordinate finder double-click convenience action.
+    Equivalent to coordinate_click with clicks=2.
+    """
+    action_type: Literal["coordinate_double_click"] = "coordinate_double_click"
+    target: str = Field(
+        description="Detailed description of what to double-click"
+    )
+    prefer_primary: bool = Field(
+        default=True,
+        description="Prefer the main/primary action when multiple candidates exist"
+    )
+    button: Literal["left", "right", "middle"] = Field(default="left")
+    description: str = Field(description="Human-readable description")
+
+
+class CoordinateRightClickAction(BaseModel):
+    """
+    Coordinate finder right-click convenience action.
+    Equivalent to coordinate_click with button='right'.
+    """
+    action_type: Literal["coordinate_right_click"] = "coordinate_right_click"
+    target: str = Field(
+        description="Detailed description of what to right-click"
+    )
+    prefer_primary: bool = Field(
+        default=True,
+        description="Prefer the main/primary action when multiple candidates exist"
+    )
+    description: str = Field(description="Human-readable description")
+
+
 class VisionClickAction(BaseModel):
     """
     Legacy vision click - use coordinate_click instead.
@@ -177,7 +212,7 @@ class FailAction(BaseModel):
 # Simple action types for chaining (without nested model complexity)
 class ChainedStep(BaseModel):
     """A single step in a chain of actions."""
-    action_type: str = Field(description="Type of action: hotkey, type, keypress, wait, coordinate_click, click, ocr_click")
+    action_type: str = Field(description="Type of action: hotkey, type, keypress, wait, coordinate_click, coordinate_double_click, coordinate_right_click, click, ocr_click")
     keys: Optional[List[str]] = Field(default=None, description="Keys for hotkey/keypress")
     text: Optional[str] = Field(default=None, description="Text for type/ocr_click action, or target description for coordinate_click")
     target: Optional[str] = Field(default=None, description="Target description for coordinate_click (alternative to text)")
@@ -210,6 +245,8 @@ AgentAction = Union[
     HotkeyAction,
     OCRClickAction,
     CoordinateClickAction,
+    CoordinateDoubleClickAction,
+    CoordinateRightClickAction,
     MouseClickAction,
     MouseMoveAction,
     ScrollAction,
@@ -244,6 +281,8 @@ def parse_action_from_dict(data: dict) -> AgentAction:
         "hotkey": HotkeyAction,
         "ocr_click": OCRClickAction,
         "coordinate_click": CoordinateClickAction,
+        "coordinate_double_click": CoordinateDoubleClickAction,
+        "coordinate_right_click": CoordinateRightClickAction,
         "mouse_click": MouseClickAction,
         "mouse_move": MouseMoveAction,
         "scroll": ScrollAction,
