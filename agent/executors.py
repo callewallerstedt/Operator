@@ -210,8 +210,17 @@ class MouseExecutor:
     def scroll(self, amount: int, x: int = None, y: int = None) -> ActionResult:
         """Scroll at position (positive = up, negative = down)."""
         try:
+            # Normalize small scroll amounts to Windows wheel delta (120 per notch).
+            if amount == 0:
+                return ActionResult(False, "Scroll amount was 0")
+            if abs(amount) < 12:
+                amount = 120 if amount > 0 else -120
+            elif abs(amount) < 120:
+                amount = 120 if amount > 0 else -120
             if x is not None and y is not None:
                 pyautogui.moveTo(x, y)
+                # Nudge focus to the target window/area.
+                pyautogui.click(x, y)
             pyautogui.scroll(amount)
             time.sleep(config.click_delay)
             direction = "up" if amount > 0 else "down"

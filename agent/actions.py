@@ -102,6 +102,10 @@ class ScrollAction(BaseModel):
     amount: int = Field(description="Scroll amount (positive=up, negative=down)")
     x: Optional[int] = Field(default=None, description="X coordinate to scroll at")
     y: Optional[int] = Field(default=None, description="Y coordinate to scroll at")
+    percent: Optional[float] = Field(
+        default=None,
+        description="Scroll amount as a percentage of the screen height (positive=up, negative=down)"
+    )
     description: str = Field(description="Human-readable description")
 
 

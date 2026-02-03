@@ -89,6 +89,8 @@ class AgentLoop:
         self._on_step_callback: Optional[Callable] = None
         self._on_image_callback: Optional[Callable] = None  # Real-time image callback for coordinate_click
         self._on_status_callback: Optional[Callable] = None  # Real-time status callback
+        self._on_plan_callback: Optional[Callable] = None  # Callback after planning, before action
+        self._on_screenshot_callback: Optional[Callable] = None  # Callback right after screenshot capture
         
         # Start the viewer if enabled
         if self.viewer and show_viewer:
@@ -182,6 +184,11 @@ class AgentLoop:
         # 1. Capture screenshot (full screen)
         console.print(f"\n[dim]Step {state.step_number}[/dim]")
         screenshot = self.screen.capture_full()
+        if self._on_screenshot_callback:
+            try:
+                self._on_screenshot_callback(state.step_number, screenshot)
+            except Exception:
+                pass
         
         # Update viewer with screenshot
         if self.viewer:
@@ -206,6 +213,11 @@ class AgentLoop:
                 f"Step {state.step_number}: Planning next action ({config.openai_model})..."
             )
         plan = self.planner.plan_next_action(screenshot, state)
+        if self._on_plan_callback:
+            try:
+                self._on_plan_callback(state.step_number, plan)
+            except Exception:
+                pass
         
         # Display thought
         console.print(Panel(
@@ -307,6 +319,15 @@ class AgentLoop:
             return self.keyboard.type_text_safe(text)
         return self.keyboard.type_text(text)
 
+    def _resolve_scroll_amount(self, action: ScrollAction, screenshot: Image.Image) -> int:
+        """Return the scroll amount, converting percent-based requests into absolute units."""
+        amount = action.amount
+        if action.percent is not None and screenshot is not None:
+            height = max(1, screenshot.height or 1)
+            percent = float(action.percent)
+            amount = int(round(height * (percent / 100.0)))
+        return amount
+
     def _execute_action(
         self,
         action: AgentAction,
@@ -346,7 +367,8 @@ class AgentLoop:
             return self.mouse.move_to(action.x, action.y)
         
         elif isinstance(action, ScrollAction):
-            return self.mouse.scroll(action.amount, action.x, action.y)
+            amount = self._resolve_scroll_amount(action, screenshot)
+            return self.mouse.scroll(amount, action.x, action.y)
         
         elif isinstance(action, DragAction):
             return self.mouse.drag(

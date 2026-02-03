@@ -15,7 +15,9 @@ pytesseract>=0.3.10
 paddlepaddle>=2.5.0
 paddleocr>=3.3.0
 paddlex[ocr]>=3.3.0
+easyocr>=1.7.1
 opencv-contrib-python>=4.10.0.84
+boto3>=1.34.0
 
 # Mouse and keyboard control
 pyautogui>=0.9.54

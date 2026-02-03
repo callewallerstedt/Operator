@@ -12,12 +12,21 @@ from typing import Optional
 def load_env():
     env_path = Path(__file__).parent.parent / ".env"
     if env_path.exists():
-        with open(env_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    os.environ[key.strip()] = value.strip().strip('"').strip("'")
+        raw = env_path.read_bytes()
+        text = None
+        for encoding in ("utf-8", "cp1252"):
+            try:
+                text = raw.decode(encoding)
+                break
+            except Exception:
+                continue
+        if text is None:
+            text = raw.decode("utf-8", errors="ignore")
+        for line in text.splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ[key.strip()] = value.strip().strip('"').strip("'")
 
 load_env()
 
@@ -37,7 +46,9 @@ class AgentConfig:
     screenshot_scale: float = 1.0  # DPI scaling factor
     
     # OCR settings
-    ocr_language: str = "eng"
+    ocr_engine: str = field(default_factory=lambda: os.getenv("OCR_ENGINE", "easyocr"))
+    easyocr_gpu: str = field(default_factory=lambda: os.getenv("EASYOCR_GPU", "auto"))
+    ocr_language: str = "swe+eng"
     ocr_confidence_threshold: float = 50.0  # Lowered for better detection
     
     # Action execution settings
