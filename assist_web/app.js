@@ -51,7 +51,7 @@ img.addEventListener("error", () => {
     return;
   }
   errorEl.classList.remove("hidden");
-  statusEl.textContent = "Failed to load image. Check that the Discord CDN link is still valid.";
+  statusEl.textContent = "Failed to load image. The CDN link may be expired or blocked.";
 });
 
 img.addEventListener("load", () => {
