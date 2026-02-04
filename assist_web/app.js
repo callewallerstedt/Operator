@@ -17,31 +17,60 @@ const errorEl = document.getElementById("image-error");
 let selection = null;
 let retried = false;
 let objectUrl = null;
+const debugMode = params.get("debug") === "1";
+let debugEl = null;
+
+function logDebug(message) {
+  if (!debugMode) {
+    return;
+  }
+  if (!debugEl) {
+    debugEl = document.createElement("pre");
+    debugEl.id = "debug-log";
+    debugEl.style.marginTop = "12px";
+    debugEl.style.fontSize = "11px";
+    debugEl.style.color = "#9bb3ff";
+    debugEl.style.whiteSpace = "pre-wrap";
+    const controls = document.querySelector(".controls");
+    if (controls) {
+      controls.appendChild(debugEl);
+    }
+  }
+  const stamp = new Date().toISOString().slice(11, 19);
+  debugEl.textContent += `[${stamp}] ${message}\n`;
+}
 
 function loadImage() {
   if (!imgUrl) {
     errorEl.classList.remove("hidden");
+    logDebug("Missing img URL");
     return;
   }
   statusEl.textContent = "Loading image...";
   img.referrerPolicy = "no-referrer";
   img.crossOrigin = "anonymous";
   const proxiedUrl = `/api/image?url=${encodeURIComponent(imgUrl)}`;
+  logDebug(`imgUrl=${imgUrl}`);
+  logDebug(`proxy=${proxiedUrl}`);
   fetch(proxiedUrl, { cache: "no-store" })
     .then((res) => {
+      logDebug(`proxy status=${res.status}`);
+      logDebug(`proxy type=${res.headers.get("content-type") || "n/a"}`);
       if (!res.ok) {
         throw new Error(`proxy ${res.status}`);
       }
       return res.blob();
     })
     .then((blob) => {
+      logDebug(`proxy blob size=${blob.size}`);
       if (objectUrl) {
         URL.revokeObjectURL(objectUrl);
       }
       objectUrl = URL.createObjectURL(blob);
       img.src = objectUrl;
     })
-    .catch(() => {
+    .catch((err) => {
+      logDebug(`proxy fetch failed: ${err.message || err}`);
       img.src = proxiedUrl;
     });
 }
@@ -49,18 +78,22 @@ function loadImage() {
 loadImage();
 
 img.addEventListener("error", () => {
+  logDebug(`img error: src=${img.src}`);
   if (imgUrl && !retried && imgUrl.includes("?")) {
     retried = true;
     const baseUrl = imgUrl.split("?")[0];
     const proxiedUrl = `/api/image?url=${encodeURIComponent(baseUrl)}`;
+    logDebug(`retry without query: ${proxiedUrl}`);
     fetch(proxiedUrl, { cache: "no-store" })
       .then((res) => {
+        logDebug(`retry proxy status=${res.status}`);
         if (!res.ok) {
           throw new Error(`proxy ${res.status}`);
         }
         return res.blob();
       })
       .then((blob) => {
+        logDebug(`retry blob size=${blob.size}`);
         if (objectUrl) {
           URL.revokeObjectURL(objectUrl);
         }
@@ -68,18 +101,21 @@ img.addEventListener("error", () => {
         img.src = objectUrl;
       })
       .catch(() => {
+        logDebug("retry proxy failed, using direct proxy URL");
         img.src = proxiedUrl;
       });
     return;
   }
   if (imgUrl && img.src.includes("/api/image")) {
     // Proxy failed, try direct CDN.
+    logDebug("proxy failed, trying direct CDN");
     img.src = imgUrl;
     statusEl.textContent = "Proxy failed, trying direct image...";
     return;
   }
   if (imgUrl && !img.src.endsWith(imgUrl) && imgUrl.includes("?")) {
     // Direct with query failed, try without query.
+    logDebug("direct CDN failed, trying without query");
     img.src = imgUrl.split("?")[0];
     return;
   }
@@ -90,6 +126,7 @@ img.addEventListener("error", () => {
 img.addEventListener("load", () => {
   errorEl.classList.add("hidden");
   statusEl.textContent = "Click on the image to set a target.";
+  logDebug(`img loaded: ${img.naturalWidth}x${img.naturalHeight}`);
 });
 
 imageWrap.addEventListener("click", (event) => {
