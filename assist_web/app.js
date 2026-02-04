@@ -34,11 +34,30 @@ function logDebug(message) {
     const controls = document.querySelector(".controls");
     if (controls) {
       controls.appendChild(debugEl);
+    } else {
+      document.body.appendChild(debugEl);
     }
   }
   const stamp = new Date().toISOString().slice(11, 19);
   debugEl.textContent += `[${stamp}] ${message}\n`;
 }
+
+if (debugMode) {
+  logDebug("debug=1 enabled");
+  logDebug(`location=${window.location.href}`);
+}
+
+window.addEventListener("error", (event) => {
+  if (debugMode) {
+    logDebug(`window error: ${event.message || event.type}`);
+  }
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  if (debugMode) {
+    logDebug(`promise rejection: ${event.reason || "unknown"}`);
+  }
+});
 
 function loadImage() {
   if (!imgUrl) {
