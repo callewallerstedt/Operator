@@ -833,6 +833,37 @@ class AgentGUI:
                     "action_type": action_type or "",
                     "action": action_desc or "",
                 })
+
+            def on_assist(step_num, image, reason, action_desc):
+                self.message_queue.put(("status", f"Operator assist requested (step {step_num})"))
+                path = self._save_step_image(image, step_num, "assist")
+                if not path:
+                    return
+                monitor = self._get_selected_monitor()
+                if monitor and monitor.index != 0:
+                    left, top, width, height = monitor.left, monitor.top, monitor.width, monitor.height
+                else:
+                    try:
+                        all_mon = self.agent.screen.sct.monitors[0]
+                        left = all_mon.get("left", 0)
+                        top = all_mon.get("top", 0)
+                        width = all_mon.get("width", image.width)
+                        height = all_mon.get("height", image.height)
+                    except Exception:
+                        left, top, width, height = 0, 0, image.width, image.height
+                self._append_step_log({
+                    "type": "assist",
+                    "session_id": self._session_id,
+                    "step": step_num,
+                    "path": str(path),
+                    "label": "assist",
+                    "reason": reason or "",
+                    "action": action_desc or "",
+                    "left": int(left),
+                    "top": int(top),
+                    "width": int(width),
+                    "height": int(height),
+                })
             
             # Real-time status callback
             def on_status(status_text):
@@ -843,6 +874,7 @@ class AgentGUI:
             self.agent._on_status_callback = on_status
             self.agent._on_plan_callback = on_plan
             self.agent._on_screenshot_callback = on_screenshot
+            self.agent._on_assist_callback = on_assist
             
             # Set system language in planner state
             from .planner import AgentState as PlannerState

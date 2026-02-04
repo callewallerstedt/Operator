@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from collections import deque
+from urllib.parse import quote
 
 import discord
 from dotenv import load_dotenv
@@ -37,6 +38,7 @@ DISCORD_USE_MESSAGE_CONTENT = os.getenv("DISCORD_USE_MESSAGE_CONTENT", "true").l
     "on",
 }
 CHAT_SYSTEM_PROMPT = _load_prompt_file("system_prompt.txt").strip()
+ASSIST_WEB_URL = os.getenv("ASSIST_WEB_URL", "").strip()
 
 START_AGENT_SYSTEM_PROMPT = _load_prompt_file("start_agent_system.txt").strip()
 if not START_AGENT_SYSTEM_PROMPT:
@@ -54,6 +56,7 @@ _channel_tail_tasks: dict[int, asyncio.Task] = {}
 _channel_sessions: dict[int, dict[str, Any]] = {}
 
 START_CMD_RE = re.compile(r"<START_AGENT>\s*(\{.*?\})\s*</START_AGENT>", re.DOTALL)
+CLICK_CMD_RE = re.compile(r"^(?:!|/)?click\s+(-?\d+)\s*[,\s]\s*(-?\d+)(?:\s+(\S+))?$", re.IGNORECASE)
 
 
 def _extract_output_text(response: Any) -> Optional[str]:
@@ -115,6 +118,19 @@ def _extract_start_command(text: str) -> tuple[Optional[dict], str]:
         return None, text
     cleaned = START_CMD_RE.sub("", text).strip()
     return payload, cleaned
+
+
+def _parse_click_command(text: str) -> Optional[tuple[int, int, Optional[str]]]:
+    match = CLICK_CMD_RE.match((text or "").strip())
+    if not match:
+        return None
+    try:
+        x = int(match.group(1))
+        y = int(match.group(2))
+    except ValueError:
+        return None
+    session_id = match.group(3)
+    return x, y, session_id
 
 
 def _append_operator_message(path: Path, session_id: str, author: str, content: str) -> None:
@@ -232,6 +248,46 @@ async def _tail_step_log(path: Path, channel: discord.abc.Messageable, session_i
                     ]
                     msg = "\n".join([p for p in parts if p])
                     await channel.send(msg)
+                elif evt == "assist":
+                    step = payload.get("step")
+                    img_path = payload.get("path")
+                    reason = payload.get("reason", "").strip()
+                    action = payload.get("action", "").strip()
+                    left = payload.get("left", 0)
+                    top = payload.get("top", 0)
+                    width = payload.get("width", 0)
+                    height = payload.get("height", 0)
+
+                    attachment_url = None
+                    if img_path and Path(img_path).exists():
+                        try:
+                            sent = await channel.send(
+                                content=f"Assist needed (step {step}).",
+                                file=discord.File(str(img_path)),
+                            )
+                            if sent.attachments:
+                                attachment_url = sent.attachments[0].url
+                        except Exception:
+                            pass
+
+                    if ASSIST_WEB_URL and attachment_url:
+                        assist_url = (
+                            f"{ASSIST_WEB_URL}"
+                            f"?img={quote(attachment_url, safe='')}"
+                            f"&w={width}&h={height}"
+                            f"&left={left}&top={top}"
+                            f"&session={session_id}"
+                            f"&step={step}"
+                        )
+                        parts = [
+                            f"**Operator assist requested** (step {step})",
+                            f"**Action:** {action}" if action else None,
+                            f"**Reason:** {reason}" if reason else None,
+                            f"Open the assist page: {assist_url}",
+                        ]
+                        await channel.send("\n".join([p for p in parts if p]))
+                    else:
+                        await channel.send("Assist requested, but ASSIST_WEB_URL is not configured.")
                 elif evt == "complete":
                     msg = (
                         f"**Agent finished**\n"
@@ -299,6 +355,18 @@ async def on_message(message: discord.Message) -> None:
 
     session = _channel_sessions.get(message.channel.id)
     if session and session.get("active") and session.get("message_log"):
+        click = _parse_click_command(message.content)
+        if click:
+            x, y, session_override = click
+            session_id = session_override or session.get("session_id", "")
+            _append_operator_command(
+                Path(session["message_log"]),
+                session_id,
+                message.author.display_name,
+                f"click {x} {y}",
+            )
+            await message.channel.send(f"Click received: ({x}, {y})")
+            return
         if _is_stop_command(message.content):
             _append_operator_command(
                 Path(session["message_log"]),

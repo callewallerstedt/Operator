@@ -73,6 +73,17 @@ class AgentConfig:
     max_steps: int = 50  # Maximum steps before stopping
     verification_retries: int = 3  # Retries for action verification
     loop_delay: float = 0.5  # Delay between loop iterations
+
+    # Operator assist settings
+    assist_enabled: bool = field(
+        default_factory=lambda: os.getenv("ASSIST_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+    )
+    assist_after_failures: int = field(
+        default_factory=lambda: int(os.getenv("ASSIST_AFTER_FAILURES", "2"))
+    )
+    assist_cooldown_steps: int = field(
+        default_factory=lambda: int(os.getenv("ASSIST_COOLDOWN_STEPS", "3"))
+    )
     
     # Vision click sub-agent settings
     vision_marker_spacing: int = 50  # Pixels between markers in initial pass

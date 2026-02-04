@@ -5,6 +5,7 @@ Captures screenshots, calls planner, executes actions, and verifies results.
 
 import time
 import json
+import re
 from pathlib import Path
 from typing import Optional, Callable, Tuple, List
 from dataclasses import dataclass, field
@@ -99,10 +100,12 @@ class AgentLoop:
         self._on_status_callback: Optional[Callable] = None  # Real-time status callback
         self._on_plan_callback: Optional[Callable] = None  # Callback after planning, before action
         self._on_screenshot_callback: Optional[Callable] = None  # Callback right after screenshot capture
+        self._on_assist_callback: Optional[Callable] = None  # Callback when operator help is needed
 
         self._message_log_path = Path(message_log_path) if message_log_path else None
         self._message_log_pos = 0
         self._session_id = session_id or ""
+        self._last_assist_step = 0
         
         # Start the viewer if enabled
         if self.viewer and show_viewer:
@@ -230,7 +233,7 @@ class AgentLoop:
             state.ocr_summary = None
 
         # Consume operator messages (e.g., from Discord) before planning
-        operator_updates, stop_requested = self._read_operator_messages()
+        operator_updates, stop_requested, operator_clicked = self._read_operator_messages()
         if stop_requested:
             self._stop_requested = True
             return AgentResult(
@@ -246,7 +249,20 @@ class AgentLoop:
             # Keep only the last 10 updates to limit context size
             if len(state.operator_updates) > 10:
                 state.operator_updates = state.operator_updates[-10:]
-        
+        if operator_clicked:
+            # Refresh context after operator click.
+            screenshot = self.screen.capture_full()
+            if self.viewer:
+                info = f"Step {state.step_number} - Operator click"
+                self.viewer.update_screenshot(screenshot, info)
+            window_title, _ = get_active_window_info()
+            state.active_window_title = window_title
+            try:
+                ocr_result = self.ocr.process(screenshot)
+                state.ocr_summary = ocr_result.raw_text[:500]
+            except Exception:
+                state.ocr_summary = None
+
         # 3. Call planner
         console.print("[dim]Planning...[/dim]")
         if self._on_status_callback:
@@ -335,6 +351,8 @@ class AgentLoop:
             console.print(f"[green]SUCCESS: {result.message}[/green]")
         else:
             console.print(f"[red]FAILED: {result.message}[/red]")
+
+        self._maybe_request_assist(state, screenshot, action, result)
         
         # Note: No explicit verification step - the planner will see the next screenshot
         # and can determine from context if the action succeeded or not
@@ -365,21 +383,22 @@ class AgentLoop:
             history=state.history
         )
 
-    def _read_operator_messages(self) -> Tuple[List[str], bool]:
+    def _read_operator_messages(self) -> Tuple[List[str], bool, bool]:
         if not self._message_log_path:
-            return [], False
+            return [], False, False
         path = self._message_log_path
         if not path.exists():
-            return [], False
+            return [], False, False
         try:
             with path.open("r", encoding="utf-8") as f:
                 f.seek(self._message_log_pos)
                 lines = f.readlines()
                 self._message_log_pos = f.tell()
         except Exception:
-            return [], False
+            return [], False, False
         updates: List[str] = []
         stop_requested = False
+        operator_clicked = False
         for line in lines:
             line = line.strip()
             if not line:
@@ -388,13 +407,23 @@ class AgentLoop:
                 payload = json.loads(line)
             except Exception:
                 continue
+            if self._session_id and payload.get("session_id") and payload.get("session_id") != self._session_id:
+                continue
             if payload.get("type") == "operator_command":
-                if payload.get("command") == "stop":
+                command = (payload.get("command") or "").strip()
+                if command == "stop":
                     stop_requested = True
+                    continue
+                click = self._parse_click_command(command)
+                if click:
+                    x, y = click
+                    if self._on_status_callback:
+                        self._on_status_callback(f"Operator click received: ({x}, {y})")
+                    result = self.mouse.click(x, y, button=MouseButton.LEFT)
+                    operator_clicked = True
+                    updates.append(f"Human override: clicked at ({x}, {y}) -> {result.message}")
                 continue
             if payload.get("type") != "operator_message":
-                continue
-            if self._session_id and payload.get("session_id") and payload.get("session_id") != self._session_id:
                 continue
             author = payload.get("author") or "human"
             content = (payload.get("content") or "").strip()
@@ -407,7 +436,46 @@ class AgentLoop:
                 prefix += f", {timestamp}"
             prefix += f", {author})"
             updates.append(f"{prefix}: {content}")
-        return updates, stop_requested
+        return updates, stop_requested, operator_clicked
+
+    def _parse_click_command(self, command: str) -> Optional[Tuple[int, int]]:
+        if not command:
+            return None
+        raw = command.strip().lower()
+        if raw.startswith("click"):
+            raw = raw[5:].strip()
+        if raw.startswith(":"):
+            raw = raw[1:].strip()
+        if not raw:
+            return None
+        # Accept "x y" or "x,y"
+        match = re.match(r"(-?\d+)\s*[,\s]\s*(-?\d+)", raw)
+        if not match:
+            return None
+        try:
+            x = int(match.group(1))
+            y = int(match.group(2))
+        except ValueError:
+            return None
+        return x, y
+
+    def _maybe_request_assist(self, state: AgentState, screenshot: Image.Image, action: AgentAction, result: ActionResult) -> None:
+        if not config.assist_enabled:
+            return
+        if result.success:
+            return
+        if state.consecutive_failures < config.assist_after_failures:
+            return
+        if state.step_number - self._last_assist_step < config.assist_cooldown_steps:
+            return
+        self._last_assist_step = state.step_number
+        if self._on_assist_callback:
+            try:
+                reason = result.message or "Action failed"
+                action_desc = getattr(action, "description", str(action))
+                self._on_assist_callback(state.step_number, screenshot, reason, action_desc)
+            except Exception:
+                pass
 
     def _extra_wait_after_action(self, action: AgentAction, result: ActionResult) -> float:
         if not result.success:

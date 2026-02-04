@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Operator Assist</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="top">
+        <div class="title">Operator Assist</div>
+        <div class="subtitle">Place the crosshair where the agent should click.</div>
+      </header>
+
+      <main class="content">
+        <section class="image-panel">
+          <div id="image-wrap" class="image-wrap">
+            <img id="shot" alt="Agent screenshot" />
+            <div id="crosshair" class="crosshair hidden"></div>
+          </div>
+          <div id="image-error" class="error hidden">Missing or invalid image link.</div>
+        </section>
+
+        <aside class="controls">
+          <div class="row">
+            <div class="label">Coords</div>
+            <div id="coords" class="value">—</div>
+          </div>
+          <div class="row">
+            <div class="label">Absolute</div>
+            <div id="abs-coords" class="value">—</div>
+          </div>
+          <button id="confirm" class="primary" disabled>Confirm Click</button>
+          <div id="status" class="status">Waiting for selection…</div>
+        </aside>
+      </main>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
