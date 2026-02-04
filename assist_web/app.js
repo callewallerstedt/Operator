@@ -15,12 +15,44 @@ const statusEl = document.getElementById("status");
 const errorEl = document.getElementById("image-error");
 
 let selection = null;
+let retried = false;
 
-if (!imgUrl) {
-  errorEl.classList.remove("hidden");
-} else {
-  img.src = imgUrl;
+async function loadImage() {
+  if (!imgUrl) {
+    errorEl.classList.remove("hidden");
+    return;
+  }
+  statusEl.textContent = "Loading image...";
+  img.referrerPolicy = "no-referrer";
+  img.crossOrigin = "anonymous";
+  const proxiedUrl = `/api/image?url=${encodeURIComponent(imgUrl)}`;
+  try {
+    const res = await fetch(proxiedUrl, { cache: "no-store" });
+    if (!res.ok) {
+      throw new Error(`proxy ${res.status}`);
+    }
+    const blob = await res.blob();
+    img.src = URL.createObjectURL(blob);
+  } catch (err) {
+    // Fallback to direct CDN if proxy failed.
+    img.src = imgUrl;
+    statusEl.textContent = "Proxy failed, trying direct image...";
+  }
 }
+
+loadImage();
+
+img.addEventListener("error", () => {
+  if (imgUrl && !retried && imgUrl.includes("?")) {
+    retried = true;
+    const baseUrl = imgUrl.split("?")[0];
+    const proxiedUrl = `/api/image?url=${encodeURIComponent(baseUrl)}`;
+    img.src = proxiedUrl;
+    return;
+  }
+  errorEl.classList.remove("hidden");
+  statusEl.textContent = "Failed to load image. Check that the Discord CDN link is still valid.";
+});
 
 img.addEventListener("load", () => {
   errorEl.classList.add("hidden");
