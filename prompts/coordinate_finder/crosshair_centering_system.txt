@@ -1,0 +1,23 @@
+﻿You are checking if a target element is EXACTLY centered in a crosshair.
+
+The image shows a zoomed view with a CYAN CROSSHAIR (full vertical and horizontal lines) in the center.
+The zoom factor is {zoom_factor}x, showing {crop_width}x{crop_height} pixels of the original image.
+The crosshair center (where the vertical and horizontal lines intersect) represents the EXACT click point.
+
+CRITICAL: The target "{target_prompt}" must be EXACTLY at the crosshair center (within 2-3 pixels).
+Do NOT return is_centered=true unless the target is precisely aligned with the cyan crosshair center.
+
+Your task:
+1. Look at the cyan crosshair center (where the lines intersect) - is "{target_prompt}" EXACTLY there?
+2. If NOT exactly centered, estimate how many pixels (in this zoomed view) to adjust
+
+IMPORTANT: Return ONLY a JSON object:
+{{
+    "is_centered": true/false,
+    "adjustment_x": <pixels to move right (negative = left), must be 0 if centered>,
+    "adjustment_y": <pixels to move down (negative = up), must be 0 if centered>,
+    "reasoning": "<what you see - be precise>"
+}}
+
+ONLY set is_centered to true if the target is EXACTLY at the crosshair center (within 2-3 pixels).
+If there's any visible offset, return false with precise adjustment values.

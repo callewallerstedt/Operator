@@ -4,7 +4,9 @@ Captures screenshots, calls planner, executes actions, and verifies results.
 """
 
 import time
-from typing import Optional, Callable, Tuple
+import json
+from pathlib import Path
+from typing import Optional, Callable, Tuple, List
 from dataclasses import dataclass, field
 from enum import Enum
 from PIL import Image
@@ -70,7 +72,13 @@ class AgentLoop:
     6. Repeats until done or failed
     """
     
-    def __init__(self, show_viewer: bool = True, monitor_offset: Optional[Tuple[int, int]] = None):
+    def __init__(
+        self,
+        show_viewer: bool = True,
+        monitor_offset: Optional[Tuple[int, int]] = None,
+        message_log_path: Optional[str] = None,
+        session_id: str = "",
+    ):
         self.screen = get_screen_capture()
         self.ocr = get_ocr_engine()
         self.keyboard = get_keyboard()
@@ -91,6 +99,10 @@ class AgentLoop:
         self._on_status_callback: Optional[Callable] = None  # Real-time status callback
         self._on_plan_callback: Optional[Callable] = None  # Callback after planning, before action
         self._on_screenshot_callback: Optional[Callable] = None  # Callback right after screenshot capture
+
+        self._message_log_path = Path(message_log_path) if message_log_path else None
+        self._message_log_pos = 0
+        self._session_id = session_id or ""
         
         # Start the viewer if enabled
         if self.viewer and show_viewer:
@@ -117,7 +129,7 @@ class AgentLoop:
         self._on_step_callback = on_step
         
         start_time = time.time()
-        state = AgentState(task=task, system_language=system_language)
+        state = AgentState(task=task, goal=task, system_language=system_language)
         
         console.print(Panel(
             f"[bold cyan]Starting task:[/bold cyan] {task}",
@@ -131,7 +143,7 @@ class AgentLoop:
             try:
                 result = self._execute_step(state)
                 
-                if result.status in (AgentStatus.COMPLETED, AgentStatus.FAILED):
+                if result.status in (AgentStatus.COMPLETED, AgentStatus.FAILED, AgentStatus.STOPPED):
                     duration = time.time() - start_time
                     return AgentResult(
                         status=result.status,
@@ -160,6 +172,17 @@ class AgentLoop:
             # Small delay between iterations
             time.sleep(config.loop_delay)
         
+        if self._stop_requested:
+            duration = time.time() - start_time
+            return AgentResult(
+                status=AgentStatus.STOPPED,
+                task=task,
+                steps_taken=state.step_number,
+                duration=duration,
+                final_message="Stopped by operator",
+                history=state.history
+            )
+
         # Max steps reached
         duration = time.time() - start_time
         return AgentResult(
@@ -205,6 +228,24 @@ class AgentLoop:
             state.ocr_summary = ocr_result.raw_text[:500]
         except Exception:
             state.ocr_summary = None
+
+        # Consume operator messages (e.g., from Discord) before planning
+        operator_updates, stop_requested = self._read_operator_messages()
+        if stop_requested:
+            self._stop_requested = True
+            return AgentResult(
+                status=AgentStatus.STOPPED,
+                task=state.task,
+                steps_taken=state.step_number,
+                duration=0,
+                final_message="Stopped by operator",
+                history=state.history,
+            )
+        if operator_updates:
+            state.operator_updates.extend(operator_updates)
+            # Keep only the last 10 updates to limit context size
+            if len(state.operator_updates) > 10:
+                state.operator_updates = state.operator_updates[-10:]
         
         # 3. Call planner
         console.print("[dim]Planning...[/dim]")
@@ -270,12 +311,25 @@ class AgentLoop:
         
         # Wait for UI to respond after action
         time.sleep(config.post_action_delay)
+
+        # Additional wait after app launches or heavy transitions
+        extra_wait = self._extra_wait_after_action(action, result)
+        if extra_wait > 0:
+            if self._on_status_callback:
+                self._on_status_callback(f"Waiting {extra_wait:.1f}s for app to load...")
+            time.sleep(extra_wait)
         
         # 6. Update state
         state.last_action = action.description
         state.last_action_success = result.success
         state.last_action_result = result.message
         state.add_to_history(f"{action.description} -> {'SUCCESS' if result.success else 'FAILED'}")
+        if result.success:
+            state.consecutive_failures = 0
+        else:
+            state.consecutive_failures += 1
+            state.last_failed_action = action.description
+            state.failure_counts[action.description] = state.failure_counts.get(action.description, 0) + 1
         
         if result.success:
             console.print(f"[green]SUCCESS: {result.message}[/green]")
@@ -310,6 +364,97 @@ class AgentLoop:
             final_message="",
             history=state.history
         )
+
+    def _read_operator_messages(self) -> Tuple[List[str], bool]:
+        if not self._message_log_path:
+            return [], False
+        path = self._message_log_path
+        if not path.exists():
+            return [], False
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                f.seek(self._message_log_pos)
+                lines = f.readlines()
+                self._message_log_pos = f.tell()
+        except Exception:
+            return [], False
+        updates: List[str] = []
+        stop_requested = False
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if payload.get("type") == "operator_command":
+                if payload.get("command") == "stop":
+                    stop_requested = True
+                continue
+            if payload.get("type") != "operator_message":
+                continue
+            if self._session_id and payload.get("session_id") and payload.get("session_id") != self._session_id:
+                continue
+            author = payload.get("author") or "human"
+            content = (payload.get("content") or "").strip()
+            if not content:
+                continue
+            timestamp = payload.get("timestamp")
+            source = payload.get("source") or "discord"
+            prefix = f"Human update ({source}"
+            if timestamp:
+                prefix += f", {timestamp}"
+            prefix += f", {author})"
+            updates.append(f"{prefix}: {content}")
+        return updates, stop_requested
+
+    def _extra_wait_after_action(self, action: AgentAction, result: ActionResult) -> float:
+        if not result.success:
+            return 0.0
+        # Don't stack extra waits after explicit wait actions
+        if isinstance(action, WaitAction):
+            return 0.0
+        wait_seconds = getattr(config, "app_launch_wait_seconds", 0.0) or 0.0
+        if wait_seconds <= 0:
+            return 0.0
+        if isinstance(action, CoordinateDoubleClickAction):
+            return wait_seconds
+        if isinstance(action, CoordinateClickAction) and getattr(action, "clicks", 1) >= 2:
+            return wait_seconds
+        if isinstance(action, MouseClickAction) and getattr(action, "clicks", 1) >= 2:
+            return wait_seconds
+        if isinstance(action, ChainAction):
+            if any(step.action_type == "wait" and (step.seconds or 0) >= 2 for step in action.steps):
+                return 0.0
+            if self._chain_looks_like_app_launch(action.steps):
+                return wait_seconds
+        desc = (getattr(action, "description", "") or "").lower()
+        if any(word in desc for word in ("open", "launch", "start", "run", "load app", "open app", "open application")):
+            return wait_seconds
+        return 0.0
+
+    def _chain_looks_like_app_launch(self, steps: List[ChainedStep]) -> bool:
+        has_win = False
+        has_type = False
+        has_enter = False
+        for step in steps:
+            if step.action_type == "hotkey" and step.keys:
+                if any(k.lower() in ("win", "windows") for k in step.keys):
+                    has_win = True
+            if step.action_type == "type" and (step.text or "").strip():
+                has_type = True
+            if step.action_type in ("keypress", "hotkey") and step.keys:
+                if any(k.lower() in ("enter", "return") for k in step.keys):
+                    has_enter = True
+        if has_win and has_type and has_enter:
+            return True
+        for step in steps:
+            if step.action_type == "coordinate_double_click":
+                return True
+            if step.action_type == "coordinate_click" and (step.clicks or 1) >= 2:
+                return True
+        return False
     
     def _text_needs_clipboard(self, text: str) -> bool:
         return any(ord(ch) > 127 for ch in text)

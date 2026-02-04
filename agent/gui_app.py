@@ -91,6 +91,7 @@ class AgentGUI:
         self._auto_prompt = os.getenv("AGENT_PROMPT", "").strip()
         self._auto_start = os.getenv("AGENT_AUTO_START", "").strip().lower() in {"1", "true", "yes", "on"}
         self._step_log_path = os.getenv("AGENT_STEP_LOG", "").strip()
+        self._message_log_path = os.getenv("AGENT_MESSAGE_LOG", "").strip()
         self._session_id = os.getenv("AGENT_SESSION_ID", "").strip()
         self._step_log_lock = threading.Lock()
         self._run_dir = None
@@ -753,7 +754,12 @@ class AgentGUI:
             
             # Create agent with GUI monitoring and monitor offset
             from .loop import AgentLoop
-            self.agent = AgentLoop(show_viewer=False, monitor_offset=monitor_offset)
+            self.agent = AgentLoop(
+                show_viewer=False,
+                monitor_offset=monitor_offset,
+                message_log_path=self._message_log_path,
+                session_id=self._session_id,
+            )
             
             # Override screenshot capture to use selected monitor
             original_capture = self.agent.screen.capture_full

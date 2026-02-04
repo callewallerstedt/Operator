@@ -1,0 +1,3 @@
+﻿Instruction: {instruction}
+Window title: {window_title}
+Screen: {screen_width}x{screen_height}, Image: {image_width}x{image_height}.

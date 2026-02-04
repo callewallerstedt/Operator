@@ -1,0 +1,12 @@
+﻿User wants to: {instruction}
+
+Planner intent:
+{intent_summary}
+
+Candidates found:
+{candidates_text}
+
+Location details:
+{location_details}
+
+Look at the screenshot and the candidate text labels. Choose the candidate ID that BEST matches what the user wants to click. Use semantic understanding - the text doesn't need to match exactly, but should be semantically related to the user's instruction.

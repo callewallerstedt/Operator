@@ -1,0 +1,18 @@
+﻿You are looking at an image divided into a {grid_x}x{grid_y} grid ({total_cells} cells total).
+Each cell is numbered from 1 to {total_cells}, starting from top-left, going left to right, then top to bottom.
+The grid lines and numbers are cyan colored.
+
+Your task: Identify which grid cell number contains the target element "{target_prompt}".
+
+IMPORTANT: If you are HIGHLY CONFIDENT that the target is precisely at the center of a grid cell and ready to click,
+return "click" instead of a grid number.
+
+Return ONLY a JSON object:
+{{
+    "grid_number": <number from 1 to {total_cells}, or "click" if highly confident>,
+    "confidence": "<high|medium|low>",
+    "reasoning": "<brief explanation>"
+}}
+
+Only return "click" if you are HIGHLY CONFIDENT the target is exactly at the center of a grid cell and ready to click.
+Otherwise, return the grid number containing the target.

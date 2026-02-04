@@ -5,6 +5,7 @@ import os
 import json
 import re
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 from collections import deque
@@ -16,6 +17,16 @@ from openai import OpenAI
 
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
 
+PROMPTS_DIR = Path(__file__).resolve().parents[1] / "prompts" / "discord_bot"
+
+
+def _load_prompt_file(filename: str) -> str:
+    path = PROMPTS_DIR / filename
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8")
+
+
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 OPENAI_MODEL = os.getenv("CHAT_MODEL", "gpt-4o-mini")
 DISCORD_TEST_CHANNEL_ID = os.getenv("DISCORD_TEST_CHANNEL_ID", "")
@@ -25,13 +36,22 @@ DISCORD_USE_MESSAGE_CONTENT = os.getenv("DISCORD_USE_MESSAGE_CONTENT", "true").l
     "yes",
     "on",
 }
-CHAT_SYSTEM_PROMPT = os.getenv("CHAT_SYSTEM_PROMPT", "").strip()
+CHAT_SYSTEM_PROMPT = _load_prompt_file("system_prompt.txt").strip()
+
+START_AGENT_SYSTEM_PROMPT = _load_prompt_file("start_agent_system.txt").strip()
+if not START_AGENT_SYSTEM_PROMPT:
+    START_AGENT_SYSTEM_PROMPT = (
+        "When the user confirms they want to start the agent, respond with a hidden command:\n"
+        "<START_AGENT>{\"prompt\": \"...\"}</START_AGENT>\n"
+        "Do not include any other text inside the START_AGENT block. You may include normal user-visible text outside it."
+    )
 
 client = OpenAI()
 
 HISTORY_LIMIT = 6
 _channel_histories: dict[int, deque[dict[str, str]]] = {}
 _channel_tail_tasks: dict[int, asyncio.Task] = {}
+_channel_sessions: dict[int, dict[str, Any]] = {}
 
 START_CMD_RE = re.compile(r"<START_AGENT>\s*(\{.*?\})\s*</START_AGENT>", re.DOTALL)
 
@@ -55,11 +75,7 @@ def _generate_reply_sync(user_text: str, history: list[dict[str, str]]) -> str:
 
     input_payload.append({
         "role": "system",
-        "content": (
-            "When the user confirms they want to start the agent, respond with a hidden command:\n"
-            "<START_AGENT>{\"prompt\": \"...\"}</START_AGENT>\n"
-            "Do not include any other text inside the START_AGENT block. You may include normal user-visible text outside it."
-        ),
+        "content": START_AGENT_SYSTEM_PROMPT,
     })
 
     input_payload.extend(history)
@@ -101,7 +117,56 @@ def _extract_start_command(text: str) -> tuple[Optional[dict], str]:
     return payload, cleaned
 
 
-async def _tail_step_log(path: Path, channel: discord.abc.Messageable, session_id: str) -> None:
+def _append_operator_message(path: Path, session_id: str, author: str, content: str) -> None:
+    payload = {
+        "type": "operator_message",
+        "session_id": session_id,
+        "author": author,
+        "content": content,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "discord",
+    }
+    try:
+        line = json.dumps(payload, ensure_ascii=False)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        return
+
+
+def _append_operator_command(path: Path, session_id: str, author: str, command: str) -> None:
+    payload = {
+        "type": "operator_command",
+        "session_id": session_id,
+        "author": author,
+        "command": command,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "discord",
+    }
+    try:
+        line = json.dumps(payload, ensure_ascii=False)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        return
+
+
+def _is_stop_command(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    return normalized in {
+        "stop",
+        "!stop",
+        "/stop",
+        "cancel",
+        "abort",
+        "halt",
+        "quit",
+        "end",
+        "terminate",
+    }
+
+
+async def _tail_step_log(path: Path, channel: discord.abc.Messageable, session_id: str, channel_id: int) -> None:
     last_pos = 0
     try:
         while True:
@@ -175,6 +240,9 @@ async def _tail_step_log(path: Path, channel: discord.abc.Messageable, session_i
                         f"Message: {payload.get('final_message','')}"
                     )
                     await channel.send(msg)
+                    sess = _channel_sessions.get(channel_id)
+                    if sess and sess.get("session_id") == session_id:
+                        sess["active"] = False
                     return
             await asyncio.sleep(0.5)
     except asyncio.CancelledError:
@@ -219,9 +287,6 @@ async def on_message(message: discord.Message) -> None:
     if not message.content:
         return
 
-    if not DISCORD_USE_MESSAGE_CONTENT and bot.user not in message.mentions:
-        return
-
     if DISCORD_TEST_CHANNEL_ID:
         try:
             allowed_channel_id = int(DISCORD_TEST_CHANNEL_ID)
@@ -232,9 +297,30 @@ async def on_message(message: discord.Message) -> None:
         if message.channel.id != allowed_channel_id:
             return
 
-    history = _channel_histories.setdefault(
-        message.channel.id, deque(maxlen=HISTORY_LIMIT)
-    )
+    session = _channel_sessions.get(message.channel.id)
+    if session and session.get("active") and session.get("message_log"):
+        if _is_stop_command(message.content):
+            _append_operator_command(
+                Path(session["message_log"]),
+                session.get("session_id", ""),
+                message.author.display_name,
+                "stop",
+            )
+            await message.channel.send("Stopping agent...")
+            return
+        _append_operator_message(
+            Path(session["message_log"]),
+            session.get("session_id", ""),
+            message.author.display_name,
+            message.content,
+        )
+        await message.channel.send("Added your note to the running agent.")
+        return
+
+    if not DISCORD_USE_MESSAGE_CONTENT and bot.user not in message.mentions:
+        return
+
+    history = _channel_histories.setdefault(message.channel.id, deque(maxlen=HISTORY_LIMIT))
     reply_text = await _generate_reply(message.content, list(history))
     start_payload, cleaned_reply = _extract_start_command(reply_text)
     history.append({"role": "user", "content": message.content})
@@ -251,6 +337,7 @@ async def on_message(message: discord.Message) -> None:
         runs_dir.mkdir(parents=True, exist_ok=True)
         session_id = f"{message.channel.id}-{int(message.created_at.timestamp())}"
         step_log = runs_dir / f"agent_steps_{session_id}.jsonl"
+        message_log = runs_dir / f"agent_messages_{session_id}.jsonl"
 
         # Start GUI with auto-start prompt
         cmd = [
@@ -261,6 +348,8 @@ async def on_message(message: discord.Message) -> None:
             "--auto-start",
             "--step-log",
             str(step_log),
+            "--message-log",
+            str(message_log),
             "--session-id",
             session_id,
         ]
@@ -270,8 +359,14 @@ async def on_message(message: discord.Message) -> None:
         existing = _channel_tail_tasks.get(message.channel.id)
         if existing and not existing.done():
             existing.cancel()
+        _channel_sessions[message.channel.id] = {
+            "session_id": session_id,
+            "step_log": str(step_log),
+            "message_log": str(message_log),
+            "active": True,
+        }
         _channel_tail_tasks[message.channel.id] = asyncio.create_task(
-            _tail_step_log(step_log, message.channel, session_id)
+            _tail_step_log(step_log, message.channel, session_id, message.channel.id)
         )
 
         if cleaned_reply:

@@ -1,0 +1,3 @@
+﻿When the user confirms they want to start the agent, respond with a hidden command:
+<START_AGENT>{"prompt": "..."}</START_AGENT>
+Do not include any other text inside the START_AGENT block. You may include normal user-visible text outside it.

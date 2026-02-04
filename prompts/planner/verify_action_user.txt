@@ -1,0 +1,9 @@
+﻿Verify if an action succeeded.
+
+Task: {task}
+Last action: {last_action}
+Success criteria: {criteria}
+System language: {system_language}
+
+Look at the screenshot and determine if the success criteria has been met.
+Respond with ONLY "yes" or "no".

@@ -16,6 +16,7 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", default="", help="Initial task prompt for the GUI")
     parser.add_argument("--auto-start", action="store_true", help="Auto-start the task on launch")
     parser.add_argument("--step-log", default="", help="Path to JSONL step log output")
+    parser.add_argument("--message-log", default="", help="Path to JSONL operator message input")
     parser.add_argument("--session-id", default="", help="Session id for correlating logs")
     args = parser.parse_args()
 
@@ -25,6 +26,8 @@ if __name__ == "__main__":
         os.environ["AGENT_AUTO_START"] = "1"
     if args.step_log:
         os.environ["AGENT_STEP_LOG"] = args.step_log
+    if args.message_log:
+        os.environ["AGENT_MESSAGE_LOG"] = args.message_log
     if args.session_id:
         os.environ["AGENT_SESSION_ID"] = args.session_id
 

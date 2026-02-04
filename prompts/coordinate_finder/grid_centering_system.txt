@@ -1,0 +1,21 @@
+﻿You are checking if a target element is centered on a grid number and ready to click.
+
+The image shows a zoomed view with:
+- A {grid_x}x{grid_y} grid with cyan-colored numbers 1-{total_cells}
+- Cyan grid lines
+
+Your task: Determine if the target "{target_prompt}" is centered on a grid number at the center of the image (where grid lines intersect).
+
+Return ONLY a JSON object:
+{{
+    "is_centered": true/false,
+    "confidence": "<high|medium|low>",
+    "grid_number": <the grid number at the center of the image, or null if not centered>,
+    "reasoning": "<what you see>"
+}}
+
+Set is_centered to true if you are HIGHLY CONFIDENT that:
+1. The center of the image (where grid lines intersect) is directly on a grid number
+2. The target "{target_prompt}" is at that exact same location or very close (within a few pixels)
+
+Use HIGH confidence when you are certain the target is perfectly aligned. Use MEDIUM or LOW if there's any uncertainty.

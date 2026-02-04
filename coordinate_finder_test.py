@@ -51,6 +51,7 @@ from agent.ocr import get_ocr_engine
 from agent.screenshot import ScreenRegion
 from agent.click_ocr import run_ocr_in_roi, build_ocr_candidates
 from agent.click_color import find_color_regions, build_color_candidates
+from agent.prompt_loader import load_prompt, format_prompt
 import urllib.request
 import shutil
 
@@ -4486,35 +4487,13 @@ class CoordinateFinderApp:
         # Build description of point IDs
         id_list = ", ".join(str(p["id"]) for p in points)
         
-        system_prompt = f"""You are a computer mouse cursor controller.
-
-The image shows:
-- Many small cyan numbers drawn directly on top of the screenshot.
-- The image dimensions are {width}x{height} pixels.
-
-All visible markers have IDs from this list:
-{id_list}
-
-Your task is to help narrow down where the clickable target "{target_prompt}" is on the screen.
-
-You must answer in one of two ways:
-
-1) SELECT the SINGLE numbered point whose marker is closest to the center of the clickable part of the target:
-   - Return: {{ "action": "select", "id": <number_id> }}
-   - The id MUST be one of the numbers drawn on the image.
-   - Use this when you are still refining and the point is not perfectly on the click spot yet.
-
-2) CLICK ONLY when one of the numbered points is EXACTLY on top of the correct clickable location:
-   - Return: {{ "action": "click", "id": <number_id> }}
-   - CRITICAL: Only return "click" if the numbered marker with that id is EXACTLY positioned on the precise center/clickable area of "{target_prompt}".
-   - If the point is close but not exactly on it, you MUST return "select" instead to refine further.
-   - Only click when you are 100% certain the point is perfectly aligned with the target.
-
-Rules:
-- NEVER invent new ids; only use one of: {id_list}.
-- For action="select": choose the id whose marker is closest to the center of the clickable target (use this if not exactly on target).
-- For action="click": ONLY use this when the point is EXACTLY on the target - if there's any doubt, use "select" instead.
-- No extra keys, no confidence, no explanations."""
+        system_prompt = format_prompt(
+            load_prompt("coordinate_finder/cursor_movement_system.txt"),
+            width=width,
+            height=height,
+            id_list=id_list,
+            target_prompt=target_prompt,
+        )
         
         try:
             response = self.client.chat.completions.create(
@@ -5469,101 +5448,16 @@ Rules:
         try:
             image_b64 = self.encode_image(snapshot.image)
 
-            system_prompt = """
-You are the PLANNER brain in a coordinate-finding system.
-You NEVER choose pixels or coordinates. You ONLY describe what the correct target SHOULD look like.
+            system_prompt = load_prompt("coordinate_finder/planner_system.txt")
 
-Rules:
-- You may answer with decision="UNSURE" if you are not confident.
-- Do NOT guess.
-- You only describe: text, approximate location, and visual cues.
-- If a field is uncertain, set it to "unknown".
-- You are locating WHAT to click to achieve the user's goal. If clicking text inside the target is the fastest path, set text_intent accordingly.
-- Example: if the goal is "search bar", you can target the visible placeholder/label text inside the search input.
-- Example: to close a tab, the clickable target may be a small "X" icon; text_intent can be "x".
-- If the target is a logo/icon/symbol or there is no visible text, set text_intent.primary_text="" and text_intent.variants=[].
-
-You are given:
-- A UI screenshot (as an image)
-- A short instruction like "click save", "press export", "open file menu"
-
-Your job:
-1) Describe the TEXT INTENT:
-   - primary_text: the most likely exact text on the element (button label, menu item, etc.)
-   - variants: acceptable alternative strings (translations, casing, small variations)
-   - strictness: "high", "medium", or "low" (how strict matching should be)
-
-2) Describe the LOCATION INTENT:
-        - scope: "window" or "screen"
-        - zone: one of ["top_bar", "left", "right", "footer", "center", "any"] ("sidebar" is treated as left)
-        - position: one of ["top_left", "top", "top_right", "left", "center", "right", "bottom_left", "bottom", "bottom_right", "any"]
-
-Zone definitions (approximate, with overlap):
-- top_bar: top ~30% of the window (overlaps downwards)
-- left: left ~35% of the window (overlaps rightwards; also called "sidebar")
-- right: right ~35% of the window (overlaps leftwards)
-- footer: bottom ~25% of the window (overlaps upwards)
-- center: middle ~90% of the window (very wide; includes edges)
-- any: full window
-
-3) Describe the VISUAL INTENT (use these for deterministic filtering):
-   - description: a short plain-language description of the element's look
-   - primary_color: one of ["white", "grey", "black", "red", "blue", "green", "pink", "purple", "yellow", "unknown"]
-   - relative_luminance: "lighter" | "darker" | "similar" | "unknown" (relative to nearby background)
-   - shape: "rounded_rectangle" | "rectangle" | "pill" | "circle" | "icon" | "text_only" | "unknown"
-   - size: "small" | "medium" | "large" | "full_width" | "unknown"
-     (rough guide: small ~40x40 px, medium ~120x60 px, large ~200x80 px, full_width spans most of container)
-   - width: "narrow" | "medium" | "wide" | "full" | "unknown"
-   - height: "short" | "medium" | "tall" | "unknown"
-   - text_presence: "required" | "optional" | "absent" | "unknown"
-   - accent_color_relevant: true/false
-   - shape_importance: "low", "medium", or "high"
-
-4) Describe the RISK:
-   - level: "low", "medium", or "high"
-   - Use "high" if ambiguity or dangerous actions are likely.
-
-5) Global decision:
-   - decision: "OK" if you are confident enough to let the deterministic engine search.
-   - decision: "UNSURE" if even the high-level intent is unclear.
-
-Respond with ONLY a single JSON object, no markdown, no commentary.
-Schema:
-{
-  "text_intent": {
-    "primary_text": "...",
-    "variants": ["...", "..."],
-    "strictness": "high|medium|low"
-  },
-  "location_intent": {
-    "scope": "window|screen",
-    "zone": "top_bar|left|right|footer|center|any",
-    "position": "top_left|top|top_right|left|center|right|bottom_left|bottom|bottom_right|any"
-  },
-  "visual_intent": {
-    "description": "...",
-    "primary_color": "white|grey|black|red|blue|green|pink|purple|yellow|unknown",
-    "relative_luminance": "lighter|darker|similar|unknown",
-    "shape": "rounded_rectangle|rectangle|pill|circle|icon|text_only|unknown",
-    "size": "small|medium|large|full_width|unknown",
-    "width": "narrow|medium|wide|full|unknown",
-    "height": "short|medium|tall|unknown",
-    "text_presence": "required|optional|absent|unknown",
-    "accent_color_relevant": true,
-    "shape_importance": "high|medium|low"
-  },
-  "risk": {
-    "level": "low|medium|high"
-  },
-  "decision": "OK|UNSURE"
-}
-"""
-
-            user_prompt = (
-                f"Instruction: {snapshot.user_instruction}\n"
-                f"Window title: {snapshot.window_title}\n"
-                f"Screen: {snapshot.screen_resolution[0]}x{snapshot.screen_resolution[1]}, "
-                f"Image: {snapshot.image.width}x{snapshot.image.height}."
+            user_prompt = format_prompt(
+                load_prompt("coordinate_finder/planner_user.txt"),
+                instruction=snapshot.user_instruction,
+                window_title=snapshot.window_title,
+                screen_width=snapshot.screen_resolution[0],
+                screen_height=snapshot.screen_resolution[1],
+                image_width=snapshot.image.width,
+                image_height=snapshot.image.height,
             )
 
             plan_dict = None
@@ -7790,36 +7684,14 @@ Schema:
             if planner.visual_intent.description:
                 intent_summary += f", visual='{planner.visual_intent.description}'"
 
-            system_prompt = """
-You are the PICKER brain in a coordinate-finding system.
-You are given:
-- A cropped screenshot showing candidate regions
-- A numbered list of candidate regions with their text labels and scores
-- A description of what the user wants to click (planner intent)
+            system_prompt = load_prompt("coordinate_finder/picker_system.txt")
 
-IMPORTANT RULES:
-- You MUST pick exactly ONE candidate ID from the list OR return "UNSURE".
-- Do NOT rely solely on the scores - use your semantic understanding of the text.
-- The scores are just hints - YOU decide which candidate best matches the user's intent.
-- Look at the ACTUAL TEXT in each candidate region in the image.
-- Match based on MEANING, not just exact text strings.
-- Consider synonyms, translations, and context (e.g., "Save" matches "Spara" in Swedish).
-- If multiple candidates could match, choose the one that BEST fits the user's instruction.
-- Only return "UNSURE" if NO candidate reasonably matches the intent.
-
-Respond with ONLY a JSON object:
-{"choice": <id_or_"UNSURE">, "reasoning": "<brief explanation>"}
-"""
-
-            user_prompt = (
-                f"User wants to: {snapshot.user_instruction}\n\n"
-                f"Planner intent:\n{intent_summary}\n\n"
-                f"Candidates found:\n{candidates_text}\n\n"
-                f"Location details:\n{location_details}\n\n"
-                "Look at the screenshot and the candidate text labels. "
-                "Choose the candidate ID that BEST matches what the user wants to click. "
-                "Use semantic understanding - the text doesn't need to match exactly, "
-                "but should be semantically related to the user's instruction."
+            user_prompt = format_prompt(
+                load_prompt("coordinate_finder/picker_user.txt"),
+                instruction=snapshot.user_instruction,
+                intent_summary=intent_summary,
+                candidates_text=candidates_text,
+                location_details=location_details,
             )
 
             response = self.client.chat.completions.create(
@@ -8021,17 +7893,11 @@ Respond with ONLY a JSON object:
             
         self.log(f"Asking AI to find: '{prompt}'", 'ai')
         
-        system_prompt = f"""You are a precise coordinate finder. You are looking at a screenshot.
-The image dimensions are {self.original_image.width}x{self.original_image.height} pixels.
-Coordinates (0,0) are at the TOP-LEFT corner.
-X increases to the right, Y increases downward.
-
-Your task: Find the CENTER coordinates of the element the user wants to click.
-
-IMPORTANT: Return ONLY a JSON object with x and y coordinates, nothing else.
-Format: {{"x": <number>, "y": <number>, "confidence": "<low|medium|high>", "reasoning": "<brief explanation>"}}
-
-Be as precise as possible. Think about where the center of the target element is."""
+        system_prompt = format_prompt(
+            load_prompt("coordinate_finder/initial_coordinates_system.txt"),
+            width=self.original_image.width,
+            height=self.original_image.height,
+        )
 
         try:
             # Add crosshair to image for AI
@@ -8161,24 +8027,13 @@ Be as precise as possible. Think about where the center of the target element is
         
         total_cells = grid_x * grid_y
         
-        system_prompt = f"""You are looking at an image divided into a {grid_x}x{grid_y} grid ({total_cells} cells total).
-Each cell is numbered from 1 to {total_cells}, starting from top-left, going left to right, then top to bottom.
-The grid lines and numbers are cyan colored.
-
-Your task: Identify which grid cell number contains the target element "{target_prompt}".
-
-IMPORTANT: If you are HIGHLY CONFIDENT that the target is precisely at the center of a grid cell and ready to click,
-return "click" instead of a grid number.
-
-Return ONLY a JSON object:
-{{
-    "grid_number": <number from 1 to {total_cells}, or "click" if highly confident>,
-    "confidence": "<high|medium|low>",
-    "reasoning": "<brief explanation>"
-}}
-
-Only return "click" if you are HIGHLY CONFIDENT the target is exactly at the center of a grid cell and ready to click.
-Otherwise, return the grid number containing the target."""
+        system_prompt = format_prompt(
+            load_prompt("coordinate_finder/grid_selector_system.txt"),
+            grid_x=grid_x,
+            grid_y=grid_y,
+            total_cells=total_cells,
+            target_prompt=target_prompt,
+        )
         
         try:
             response = self.client.chat.completions.create(
@@ -8396,27 +8251,13 @@ Otherwise, return the grid number containing the target."""
         
         total_cells = grid_x * grid_y
         
-        system_prompt = f"""You are checking if a target element is centered on a grid number and ready to click.
-
-The image shows a zoomed view with:
-- A {grid_x}x{grid_y} grid with cyan-colored numbers 1-{total_cells}
-- Cyan grid lines
-
-Your task: Determine if the target "{target_prompt}" is centered on a grid number at the center of the image (where grid lines intersect).
-
-Return ONLY a JSON object:
-{{
-    "is_centered": true/false,
-    "confidence": "<high|medium|low>",
-    "grid_number": <the grid number at the center of the image, or null if not centered>,
-    "reasoning": "<what you see>"
-}}
-
-Set is_centered to true if you are HIGHLY CONFIDENT that:
-1. The center of the image (where grid lines intersect) is directly on a grid number
-2. The target "{target_prompt}" is at that exact same location or very close (within a few pixels)
-
-Use HIGH confidence when you are certain the target is perfectly aligned. Use MEDIUM or LOW if there's any uncertainty."""
+        system_prompt = format_prompt(
+            load_prompt("coordinate_finder/grid_centering_system.txt"),
+            grid_x=grid_x,
+            grid_y=grid_y,
+            total_cells=total_cells,
+            target_prompt=target_prompt,
+        )
         
         try:
             response = self.client.chat.completions.create(
@@ -8477,29 +8318,13 @@ Use HIGH confidence when you are certain the target is perfectly aligned. Use ME
         crop_height = crop_info['crop_height']
         zoom_factor = crop_info['zoom_factor']
         
-        system_prompt = f"""You are checking if a target element is EXACTLY centered in a crosshair.
-
-The image shows a zoomed view with a CYAN CROSSHAIR (full vertical and horizontal lines) in the center.
-The zoom factor is {zoom_factor}x, showing {crop_width}x{crop_height} pixels of the original image.
-The crosshair center (where the vertical and horizontal lines intersect) represents the EXACT click point.
-
-CRITICAL: The target "{target_prompt}" must be EXACTLY at the crosshair center (within 2-3 pixels).
-Do NOT return is_centered=true unless the target is precisely aligned with the cyan crosshair center.
-
-Your task:
-1. Look at the cyan crosshair center (where the lines intersect) - is "{target_prompt}" EXACTLY there?
-2. If NOT exactly centered, estimate how many pixels (in this zoomed view) to adjust
-
-IMPORTANT: Return ONLY a JSON object:
-{{
-    "is_centered": true/false,
-    "adjustment_x": <pixels to move right (negative = left), must be 0 if centered>,
-    "adjustment_y": <pixels to move down (negative = up), must be 0 if centered>,
-    "reasoning": "<what you see - be precise>"
-}}
-
-ONLY set is_centered to true if the target is EXACTLY at the crosshair center (within 2-3 pixels).
-If there's any visible offset, return false with precise adjustment values."""
+        system_prompt = format_prompt(
+            load_prompt("coordinate_finder/crosshair_centering_system.txt"),
+            zoom_factor=zoom_factor,
+            crop_width=crop_width,
+            crop_height=crop_height,
+            target_prompt=target_prompt,
+        )
 
         try:
             # Draw crosshair on image for AI using the new cyan crosshair

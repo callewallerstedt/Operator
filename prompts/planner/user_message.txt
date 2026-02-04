@@ -1,0 +1,10 @@
+﻿Current State:
+{state_context}
+
+Analyze the screenshot and decide the next action to complete the task.
+Respond with a JSON object containing: thought, action, and success_criteria.
+
+IMPORTANT:
+- Use chain actions for sequences (e.g., open menu + type + enter)
+- UI text may be in {system_language}
+- Be fast and efficient

@@ -150,11 +150,56 @@ class KeyboardExecutor:
 
 class MouseExecutor:
     """Handles mouse input actions."""
-    
+
+    def _ease_in_out_quad(self, t: float) -> float:
+        if t < 0.5:
+            return 2 * t * t
+        return -1 + (4 - 2 * t) * t
+
+    def _smooth_move_to(self, x: int, y: int) -> None:
+        start_x, start_y = pyautogui.position()
+        dx = x - start_x
+        dy = y - start_y
+        dist = (dx * dx + dy * dy) ** 0.5
+        if dist < 1:
+            return
+
+        duration = max(config.mouse_move_duration, dist / 2000.0)
+        steps = max(12, int(dist / 8))
+        if config.mouse_move_steps > 0:
+            steps = min(steps, config.mouse_move_steps)
+
+        # Compute a quadratic bezier control point for a gentle curve.
+        mid_x = (start_x + x) / 2.0
+        mid_y = (start_y + y) / 2.0
+        if dist > 0:
+            perp_x = -dy / dist
+            perp_y = dx / dist
+        else:
+            perp_x, perp_y = 0.0, 0.0
+        curve_sign = 1 if int(start_x + start_y + x + y) % 2 == 0 else -1
+        offset = dist * config.mouse_curve_offset
+        offset = max(20.0, min(200.0, offset))
+        ctrl_x = mid_x + perp_x * offset * curve_sign
+        ctrl_y = mid_y + perp_y * offset * curve_sign
+
+        sleep_time = duration / max(1, steps)
+        for i in range(1, steps + 1):
+            t = i / steps
+            eased = self._ease_in_out_quad(t)
+            inv = 1.0 - eased
+            px = (inv * inv * start_x) + (2 * inv * eased * ctrl_x) + (eased * eased * x)
+            py = (inv * inv * start_y) + (2 * inv * eased * ctrl_y) + (eased * eased * y)
+            pyautogui.moveTo(int(round(px)), int(round(py)))
+            time.sleep(sleep_time)
+
+        # Ensure exact final position.
+        pyautogui.moveTo(x, y)
+
     def move_to(self, x: int, y: int, duration: float = 0.1) -> ActionResult:
         """Move mouse to absolute position."""
         try:
-            pyautogui.moveTo(x, y, duration=duration)
+            self._smooth_move_to(x, y)
             return ActionResult(True, f"Moved mouse to ({x}, {y})")
         except Exception as e:
             return ActionResult(False, f"Failed to move mouse: {str(e)}")
@@ -168,7 +213,8 @@ class MouseExecutor:
     ) -> ActionResult:
         """Click at absolute position."""
         try:
-            pyautogui.click(x, y, button=button.value, clicks=clicks)
+            self._smooth_move_to(x, y)
+            pyautogui.click(button=button.value, clicks=clicks)
             time.sleep(config.click_delay)
             return ActionResult(True, f"Clicked at ({x}, {y}) with {button.value} button")
         except Exception as e:
@@ -192,13 +238,12 @@ class MouseExecutor:
     ) -> ActionResult:
         """Drag from start to end position."""
         try:
-            pyautogui.moveTo(start_x, start_y)
-            pyautogui.drag(
-                end_x - start_x,
-                end_y - start_y,
-                duration=duration,
-                button="left"
-            )
+            self._smooth_move_to(start_x, start_y)
+            pyautogui.mouseDown(button="left")
+            try:
+                self._smooth_move_to(end_x, end_y)
+            finally:
+                pyautogui.mouseUp(button="left")
             time.sleep(config.click_delay)
             return ActionResult(
                 True,
@@ -218,9 +263,9 @@ class MouseExecutor:
             elif abs(amount) < 120:
                 amount = 120 if amount > 0 else -120
             if x is not None and y is not None:
-                pyautogui.moveTo(x, y)
+                self._smooth_move_to(x, y)
                 # Nudge focus to the target window/area.
-                pyautogui.click(x, y)
+                pyautogui.click()
             pyautogui.scroll(amount)
             time.sleep(config.click_delay)
             direction = "up" if amount > 0 else "down"

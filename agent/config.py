@@ -56,6 +56,18 @@ class AgentConfig:
     type_delay: float = 0.02  # Delay between keystrokes
     action_timeout: float = 10.0  # Max wait for action verification
     post_action_delay: float = 0.8  # Delay after any action before next step
+    app_launch_wait_seconds: float = field(
+        default_factory=lambda: float(os.getenv("APP_LAUNCH_WAIT_SECONDS", "4.0"))
+    )  # Extra wait after launching apps or heavy transitions
+    mouse_move_duration: float = field(
+        default_factory=lambda: float(os.getenv("MOUSE_MOVE_DURATION", "0.18"))
+    )  # Base duration for smooth cursor moves
+    mouse_move_steps: int = field(
+        default_factory=lambda: int(os.getenv("MOUSE_MOVE_STEPS", "110"))
+    )  # Max steps for smooth cursor path
+    mouse_curve_offset: float = field(
+        default_factory=lambda: float(os.getenv("MOUSE_CURVE_OFFSET", "0.15"))
+    )  # Curve offset as fraction of distance
     
     # Agent loop settings
     max_steps: int = 50  # Maximum steps before stopping
