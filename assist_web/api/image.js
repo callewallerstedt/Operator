@@ -70,6 +70,8 @@ module.exports = async (req, res) => {
   const headers = {
     "User-Agent": "OperatorAssist/1.0",
     Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+    Referer: "https://discord.com/",
+    Origin: "https://discord.com",
   };
 
   const candidates = buildCandidates(targetUrl);

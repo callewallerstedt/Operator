@@ -17,7 +17,7 @@ const errorEl = document.getElementById("image-error");
 let selection = null;
 let retried = false;
 
-async function loadImage() {
+function loadImage() {
   if (!imgUrl) {
     errorEl.classList.remove("hidden");
     return;
@@ -26,18 +26,7 @@ async function loadImage() {
   img.referrerPolicy = "no-referrer";
   img.crossOrigin = "anonymous";
   const proxiedUrl = `/api/image?url=${encodeURIComponent(imgUrl)}`;
-  try {
-    const res = await fetch(proxiedUrl, { cache: "no-store" });
-    if (!res.ok) {
-      throw new Error(`proxy ${res.status}`);
-    }
-    const blob = await res.blob();
-    img.src = URL.createObjectURL(blob);
-  } catch (err) {
-    // Fallback to direct CDN if proxy failed.
-    img.src = imgUrl;
-    statusEl.textContent = "Proxy failed, trying direct image...";
-  }
+  img.src = proxiedUrl;
 }
 
 loadImage();
@@ -48,6 +37,17 @@ img.addEventListener("error", () => {
     const baseUrl = imgUrl.split("?")[0];
     const proxiedUrl = `/api/image?url=${encodeURIComponent(baseUrl)}`;
     img.src = proxiedUrl;
+    return;
+  }
+  if (imgUrl && img.src.includes("/api/image")) {
+    // Proxy failed, try direct CDN.
+    img.src = imgUrl;
+    statusEl.textContent = "Proxy failed, trying direct image...";
+    return;
+  }
+  if (imgUrl && !img.src.endsWith(imgUrl) && imgUrl.includes("?")) {
+    // Direct with query failed, try without query.
+    img.src = imgUrl.split("?")[0];
     return;
   }
   errorEl.classList.remove("hidden");
