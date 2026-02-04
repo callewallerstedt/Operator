@@ -16,6 +16,7 @@ const errorEl = document.getElementById("image-error");
 
 let selection = null;
 let retried = false;
+let objectUrl = null;
 
 function loadImage() {
   if (!imgUrl) {
@@ -26,7 +27,23 @@ function loadImage() {
   img.referrerPolicy = "no-referrer";
   img.crossOrigin = "anonymous";
   const proxiedUrl = `/api/image?url=${encodeURIComponent(imgUrl)}`;
-  img.src = proxiedUrl;
+  fetch(proxiedUrl, { cache: "no-store" })
+    .then((res) => {
+      if (!res.ok) {
+        throw new Error(`proxy ${res.status}`);
+      }
+      return res.blob();
+    })
+    .then((blob) => {
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+      objectUrl = URL.createObjectURL(blob);
+      img.src = objectUrl;
+    })
+    .catch(() => {
+      img.src = proxiedUrl;
+    });
 }
 
 loadImage();
@@ -36,7 +53,23 @@ img.addEventListener("error", () => {
     retried = true;
     const baseUrl = imgUrl.split("?")[0];
     const proxiedUrl = `/api/image?url=${encodeURIComponent(baseUrl)}`;
-    img.src = proxiedUrl;
+    fetch(proxiedUrl, { cache: "no-store" })
+      .then((res) => {
+        if (!res.ok) {
+          throw new Error(`proxy ${res.status}`);
+        }
+        return res.blob();
+      })
+      .then((blob) => {
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+        }
+        objectUrl = URL.createObjectURL(blob);
+        img.src = objectUrl;
+      })
+      .catch(() => {
+        img.src = proxiedUrl;
+      });
     return;
   }
   if (imgUrl && img.src.includes("/api/image")) {
